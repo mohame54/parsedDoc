@@ -1,0 +1,423 @@
+# Real-world Document Corpus Builder
+
+A configurable ingestion utility for collecting **real source documents**, preserving source files, extracting document pages, categorizing samples, deduplicating exact files, and writing a provenance manifest.
+
+It is intended as the acquisition stage before your teacher-model annotation / Batch API pipeline.
+
+## Important distinction
+
+This tool does not certify that a source is authentic, de-identified, or legally usable for model training. It records source claims and marks license review as `UNVERIFIED`. Review every dataset's current terms, consent, privacy conditions, and commercial-training rights before use.
+
+Medical documents may contain protected health information (PHI). Do not ingest private clinical records unless you have the required authorization, agreements, safeguards, and compliant environment. The script does not perform de-identification.
+
+## Layout
+
+```text
+parsedDoc/
+├── config.yaml
+├── pyproject.toml
+├── requirements.txt
+├── corpus/
+│   ├── __init__.py
+│   └── cli.py
+└── data/                     # generated
+    ├── raw/<source_id>/      # downloaded source archives
+    ├── extracted/<source_id>/
+    ├── pages/<source_id>/    # rendered PDF pages
+    ├── manifest.jsonl
+    └── summary.json
+```
+
+## Install
+
+Python 3.10+ recommended.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+For Hugging Face sources:
+
+```bash
+pip install datasets huggingface_hub
+```
+
+## Usage
+
+Preview enabled sources:
+
+```bash
+python -m corpus.cli --config config.yaml --dry-run
+```
+
+Download all enabled sources:
+
+```bash
+python -m corpus.cli --config config.yaml
+```
+
+Select one or more sources (also runs disabled sources when explicitly selected):
+
+```bash
+python -m corpus.cli --source funsd --source rxhandbd_zenodo
+```
+
+Override corpus size and document count:
+
+```bash
+python -m corpus.cli --max-total-gb 8 --max-documents 500
+```
+
+The global size budget includes files already present under `output_dir`. A source-specific `max_download_gb` limits downloaded bytes for that source. Rendered pages are also checked against the global budget.
+
+## Sources configured
+
+| Source | Ingestion | Notes |
+|---|---|---|
+| FUNSD | Direct ZIP | Real scanned forms; inspect original terms |
+| RxHandBD | Zenodo API | Real prescription-derived word crops, not full prescription pages |
+| Bilingual prescriptions | Direct URL placeholder | Paste the current Mendeley file URL after checking terms |
+| DocILE | Manual | Access token and official downloader required |
+| SROIE | Hugging Face streaming | Optional `datasets` dependency; confirm upstream terms |
+
+DocILE intentionally uses `manual`: its official repository requires a dataset access token and offers smaller subsets. Use the official downloader rather than bypassing access controls. See https://github.com/rossumai/docile.
+
+### Taking a slice of a huge archive (`kind: remote_zip`)
+
+Some datasets ship as one enormous ZIP. A `remote_zip` source reads only the archive's table of contents with HTTP
+Range requests, picks a seeded random sample, and downloads just those members (plus optional sidecar files), so
+a 8 GB archive costs a few megabytes. The server must answer Range requests with HTTP 206; otherwise the source
+is refused with a clear error. Re-running resumes: files already present with the right size are kept.
+
+```yaml
+- id: doclaynet_pdfs
+  kind: remote_zip
+  url: "https://.../DocLayNet_extra.zip"
+  include: ["PDF/*.pdf"]            # glob patterns for the documents to sample
+  sidecars: ["JSON/{stem}.json"]    # optional files fetched next to each document when the archive has them
+  max_documents: 200                # raise it to take more
+  max_download_gb: 0.5              # cap on bytes actually fetched
+```
+
+`DocLayNet_extra.zip` holds 81,471 single-page, born-digital PDFs, so `max_documents` can go as high as the
+disk budget allows. Each page has a text layer and goes straight to Stage 2 with no OCR.
+
+## Slicing and size controls
+
+In `config.yaml`:
+
+- `max_total_gb`: total disk budget.
+- `max_download_gb`: per-source download cap.
+- `max_documents`: per-source document/sample cap.
+- `max_pages_per_document`: PDF page rendering cap.
+- `max_document_mb`: skip unusually large individual files.
+- `pdf_dpi`: rendered page resolution.
+- `sampling`: `first` or deterministic `random`.
+- `max_files_per_source`: limit filesystem discovery.
+
+Note: this implementation samples files after extraction. It does not yet download partial byte ranges from ZIP archives. For DocILE, use the upstream subset options to avoid downloading the entire collection.
+
+## Categorization
+
+The `category` on each source is a fallback. Filename/path keyword rules can override it. This is a weak initial categorizer, not a model prediction or ground-truth label.
+
+For a robust corpus, keep three separate concepts:
+
+1. `source_family`: where the data came from (FUNSD, DocILE, RxHandBD).
+2. `document_type`: prescription, intake form, PO, fax, invoice, etc.
+3. `visual_conditions`: scan, fax, handwritten, rotated, low-resolution, multi-page, stamped, etc.
+
+The script currently writes the first two in a basic form. Add visual-condition labels after page analysis or teacher-assisted classification; don't infer them from a source name.
+
+## Manifest
+
+`manifest.jsonl` contains one row per document/image sample:
+
+- stable ID derived from source ID and SHA-256
+- source URL and declared license
+- category and categorization method
+- original file path, SHA-256, byte size and file type
+- rendered page paths
+- annotation status
+- explicit unverified provenance/license states
+
+For word-crop datasets, one image is one sample. For PDFs, one PDF is one document and rendered pages are attached to that document record.
+
+## Recommended next stage
+
+Consume `manifest.jsonl` in a separate annotation worker. It should:
+1. select documents by source/category/visual condition;
+2. send page images to your teacher model;
+3. store raw teacher responses separately from validated annotations;
+4. record schema version, teacher model/version, prompt hash and request ID;
+5. route low-confidence or inconsistent samples to human review.
+
+Keep source assets immutable. Never overwrite originals with normalized or redacted copies.
+
+## Labeller (Gemini Batch annotation)
+
+`labeller/` turns the corpus manifest into validated, schema-driven annotations. Configuration is in
+`config/annotation.yaml`; it needs `GEMINI_API_KEY` (read from `.env`) only for the steps that call Gemini.
+
+```bash
+uv run python -m labeller.cli plan          # route documents, estimate tokens (writes nothing)
+uv run python -m labeller.cli run           # everything, with progress bars: prepare → OCR → Stage 1 → Stage 2 → export
+uv run python -m labeller.cli status        # documents per state, top exclusion reasons
+uv run python -m labeller.cli visual        # which documents would go multimodal, and why (free)
+uv run python -m labeller.cli reevaluate    # re-run the gates on saved Gemini output after changing a setting (free)
+uv run python -m labeller.cli export --include-unverified   # train/val/test; unverified licences go to export/unverified/
+```
+
+The steps also run one at a time: `prepare`, `ocr`, `submit --stage 1|2 [--limit N]`, `collect --stage 1|2 [--watch]`,
+`export`. Every step is resumable: state lives in `data/annotations/<doc>/status.json` and each batch in
+`data/batches/`, so a crashed run continues where it stopped and never submits a batch twice.
+
+### System overview
+
+Green steps run on this machine and are free. Blue steps call the Gemini Batch API and cost money. Every red
+exit is recorded with its reason, never dropped silently.
+
+```mermaid
+flowchart TD
+    classDef local fill:#e3f4ea,stroke:#2f9e62,color:#14301f
+    classDef paid fill:#e2ecfc,stroke:#2f6fdb,color:#10264d
+    classDef stop fill:#fbe4e4,stroke:#d64545,color:#4a1414
+    classDef store fill:#f1f1f1,stroke:#777777,color:#222222
+
+    subgraph COLLECT["1 · Collect: corpus-builder"]
+        direction TB
+        A["Sources<br/>Zenodo · Hugging Face · remote ZIP, partial range download · URLs"]:::local
+        B["Download, safe extract,<br/>skip junk files, dedupe by SHA-256"]:::local
+        C{"Blank PDF form?<br/>fillable fields mostly empty"}:::local
+        D["Render up to 4 pages<br/>write data/manifest.jsonl"]:::local
+        A --> B --> C
+        C -- no --> D
+    end
+
+    subgraph ROUTE["2 · Route: labeller prepare"]
+        direction TB
+        E{"Over 4 pages, file missing,<br/>or blank form fields?"}:::local
+        G["Dataset processor<br/>FUNSD · SROIE · RxHandBD · generic"]:::local
+        H["Check labels,<br/>language filter"]:::local
+        I["PHI gate, language filter,<br/>visual analysis"]:::local
+        J["PHI gate,<br/>visual analysis"]:::local
+        E -- no --> G
+        G -- "labels and text shipped<br/>with the dataset" --> H
+        G -- "text from the dataset<br/>or a PDF text layer" --> I
+        G -- "scan or image,<br/>no text yet" --> J
+    end
+
+    subgraph READ["3 · Read the pages: scans only"]
+        direction TB
+        O["Local OCR: RapidOCR PP-OCRv5 server<br/>one pass per page, cached"]:::local
+        OG{"OCR gates<br/>no text · blank page<br/>confidence below 0.60"}:::local
+        LG{"Language<br/>allowed?"}:::local
+        S1["Stage 1: Gemini Batch<br/>page images + numbered OCR draft<br/>returns corrections, missed lines, flags"]:::paid
+        S1G{"Stage 1 gates<br/>unusable · blank · unreadable · illegible<br/>over 30 percent of characters changed<br/>language code"}:::local
+        O --> OG
+        OG -- passes --> LG
+        LG -- yes --> S1
+        S1 --> S1G
+    end
+
+    subgraph LABEL["4 · Label: Stage 2"]
+        direction TB
+        TX["Text only<br/>prompt v1 or v2<br/>fields"]:::paid
+        MM["Multimodal<br/>page images + text, prompt v3<br/>fields · tables · visual elements<br/>layout · relationships"]:::paid
+        VAL{"Stage 2 checks<br/>values found in the source text<br/>no uncertain or low-confidence fields<br/>not mostly empty<br/>ids, links and evidence consistent"}:::local
+        TX --> VAL
+        MM --> VAL
+    end
+
+    RJ[("data/rejected.jsonl")]:::stop
+    T["Corrected text with line ids<br/>plus Stage 1 layout flags"]:::local
+    V{"Visual content?<br/>auto mode"}:::local
+    BX["Attach OCR boxes to cited lines"]:::local
+    ACC[("annotation.json<br/>schema + values + provenance")]:::store
+    X[("Excluded<br/>reason in status.json and excluded.jsonl")]:::stop
+    EXP["Export: licence gate, split by document type<br/>train.jsonl · val.jsonl · test.jsonl"]:::local
+
+    C -- yes --> RJ
+    D --> E
+    E -- yes --> X
+    G -- "word crops" --> X
+    H -- passes --> ACC
+    H -- fails --> X
+    J --> O
+    OG -- fails --> X
+    LG -- no --> X
+    S1G -- fails --> X
+    S1G -- passes --> T
+    T --> V
+    I --> V
+    V -- no --> TX
+    V -- yes --> MM
+    VAL -- fails --> X
+    VAL -- passes --> BX
+    BX --> ACC
+    ACC --> EXP
+```
+
+### How Stage 2 chooses between text only and multimodal
+
+Chosen per document by free local analysis (`visual.mode: auto`). Multimodal costs about three times the input and
+output tokens of text only on a test page, so only documents with visual content pay for it.
+
+```mermaid
+flowchart LR
+    classDef local fill:#e3f4ea,stroke:#2f9e62,color:#14301f
+    classDef paid fill:#e2ecfc,stroke:#2f6fdb,color:#10264d
+    classDef key fill:#fff3d6,stroke:#c98a00,color:#3d2a00
+
+    subgraph SIG["Signals: any one is enough"]
+        direction TB
+        P1["PDF structure<br/>embedded pictures · highlight, stamp or ink<br/>annotations · checkbox fields"]:::local
+        P2["Page pixels<br/>coloured areas · light shaded blocks<br/>large dark regions<br/>thin lines, text and page-edge bands ignored"]:::local
+        P3["Stage 1 flags, scans only<br/>has_table · has_checkboxes · has_signature"]:::local
+    end
+
+    P1 --> ANY
+    P2 --> ANY
+    P3 --> ANY
+    ANY{"Any signal<br/>fired?"}:::key
+    ANY -- yes --> MM["Multimodal Stage 2<br/>stage2_v3"]:::paid
+    ANY -- no --> TX["Text-only Stage 2<br/>stage2_v1 native text<br/>stage2_v2 OCR text"]:::paid
+    M["visual.mode: never or always,<br/>or stage2.send_images: true<br/>override the signals"]:::key -.-> ANY
+```
+
+Use `labeller visual` to see every document's signals and route, and `labeller visual --apply` to save a changed
+threshold for documents that have not reached Stage 2. Thresholds are shares of the page area and are set from
+real scans; check them against your own documents.
+
+### How a Gemini batch runs and resumes
+
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant L as labeller
+    participant G as Gemini
+
+    U->>L: submit --stage N
+    L->>G: upload page images (Files API, kept 48 h)
+    L->>G: upload requests.jsonl, create the batch named labeller-runkey
+    L->>L: write batches/…/job.json, mark documents awaiting
+    Note over L,G: A crash here is safe. Running submit again finds the job by name and reattaches.
+    U->>L: collect --stage N --watch
+    loop until the job is finished
+        L->>G: poll state and request counters
+    end
+    G-->>L: succeeded, output file
+    L->>L: parse, validate, then accept, retry or exclude each document
+```
+
+### Document states
+
+```mermaid
+stateDiagram-v2
+    [*] --> needs_ocr: scan or image
+    [*] --> needs_stage2: text from the dataset or a PDF text layer
+    [*] --> accepted: SROIE style labels, no Gemini call
+    [*] --> excluded: over 4 pages, blank, wrong language, PHI gate
+
+    needs_ocr --> needs_stage1: OCR gates pass
+    needs_ocr --> excluded: no text, low confidence, wrong language
+    needs_stage1 --> awaiting_stage1: submit
+    awaiting_stage1 --> needs_stage2: Stage 1 gates pass
+    awaiting_stage1 --> needs_stage1: error or expired job, retry
+    awaiting_stage1 --> excluded: Stage 1 gates fail
+    needs_stage2 --> awaiting_stage2: submit
+    awaiting_stage2 --> accepted: Stage 2 checks pass
+    awaiting_stage2 --> needs_stage2: error or expired job, retry
+    awaiting_stage2 --> excluded: Stage 2 checks fail
+    accepted --> [*]
+    excluded --> [*]
+```
+
+A document that keeps failing is excluded after `max_attempts` retries. `labeller reevaluate` re-runs the gates on
+saved Gemini output and can move documents between `excluded`, `needs_stage2` and `accepted` without any new calls.
+
+### What is saved where
+
+```text
+data/
+├── manifest.jsonl            one row per collected document (corpus-builder)
+├── rejected.jsonl            blank PDF forms rejected at collection, with the reason
+├── annotations/<doc>/
+│   ├── status.json           state, exclusion reason, language, visual routing, models used, batch jobs
+│   ├── ocr.json              OCR lines with ids, confidence and boxes
+│   ├── stage1.json           Gemini's corrections and layout flags
+│   ├── source_text.json      the corrected text Stage 2 reads, with line ids
+│   ├── stage2.json           validated Stage 2 answer
+│   └── annotation.json       the final result: schema, values, language, visual routing, provenance
+│                             (multimodal documents also: tables, visual_elements, layout, relationships)
+├── batches/stageN-<runkey>/  input.jsonl, job.json, output.jsonl (raw Gemini output, kept for free re-checks)
+└── export/                   train/val/test.jsonl, excluded.jsonl, summary.json (unverified/ until licences are checked)
+```
+
+### Blank forms and local OCR
+
+- `corpus-builder` rejects blank PDF forms (fillable widgets mostly unfilled) before rendering. Rejections go to
+  `data/rejected.jsonl` with the reason, so nothing is dropped silently. Thresholds: `project.min_widgets`,
+  `project.max_fill_ratio`.
+- The labeller applies the same rule to manifest rows, then a backstop after extraction: a document whose fields are
+  mostly unfilled is excluded (`gates.min_extracted_ratio`).
+- `labeller ocr` runs RapidOCR (PP-OCRv5 server models) on scanned pages, free and cached per document. Stage 1 (v2)
+  then corrects the draft and reports layout flags instead of retyping pages. Set `ocr.enabled: false` and
+  `stage1.prompt_version: stage1_v1` to go back to the vision-only path.
+- First OCR run downloads about 170 MB of models into the RapidOCR package folder.
+
+### Tuning the gates without paying again
+
+Gemini's outputs are saved in `data/batches/`, so a gate change can be checked for free:
+
+```bash
+uv run python -m labeller.cli reevaluate
+```
+
+It re-runs both stages' gates on the saved outputs (no API calls). Documents that now pass Stage 1 wait in
+`needs_stage2`; run `labeller run` to label them. Documents that no longer pass a tightened gate are excluded,
+so the result always matches the current settings.
+
+Gates in `config/annotation.yaml`:
+- `max_change_ratio` (default 0.30): share of the OCR draft's characters Gemini really changed. Markup such as
+  `[x]` or `[handwritten: ...]`, punctuation and case do not count.
+- `max_value_gap` (default 6): an extracted value's words must appear in the source text in order, with at most
+  this many other words between them. This tolerates values split across columns or by handwriting tags, and
+  still rejects any value containing a word that is not in the source.
+
+Both defaults are untuned. Check them against your hand-reviewed accuracy before trusting the exported set.
+
+### Multimodal annotation (Stage 2 v3)
+
+By default Stage 2 reads text only and produces `fields`. Set `stage2.send_images: true` in
+`config/annotation.yaml` to also send the page images and use the `stage2_v3` prompt. The annotation then has
+separate components, so each can train a different kind of model:
+
+| Component | Content |
+|---|---|
+| `fields` | Extracted values, as before, plus `page` and `evidence` |
+| `tables` | Headers, rows, cells with spans, and per-row visual properties (background, highlight, bold) |
+| `visual_elements` | Checkboxes and their state, signatures, stamps, handwriting, highlights |
+| `layout` | Titles, headers, footers, sections, columns |
+| `relationships` | Links between the above by id (`checkbox_for`, `value_of`, `highlights`, ...) |
+
+Spatial grounding comes from the OCR, not from Gemini. Components cite OCR line ids in `evidence`, and the
+labeller attaches each line's measured box as `boxes` (pixels in `box_px`, 0-1 in `box`).
+Text in fields and table cells must still appear in the transcription. Visual properties cannot be checked
+by the labeller and are kept as Gemini reported them, so review them by hand.
+
+### Language filter
+
+The `language:` section in `config/annotation.yaml` lists the allowed languages (ISO 639-1 codes). Detection is
+local and free, and runs before any Gemini call: on native text and PDF text layers when documents are routed,
+and on the OCR text after `labeller ocr`. Stage 1's own `language` code is then checked against the same policy.
+
+- `unknown_policy`: `reject` or `accept` for documents with too little text or low confidence.
+- `mixed_language_policy`: `accept_if_primary_allowed`, `accept_if_all_allowed` or `reject_mixed`. A document counts
+  as mixed when a second language holds at least 10% of its letters.
+- Chinese, Japanese and other single-language scripts are decided by Unicode script. The statistical detector
+  (`py3langid`) separates languages that share a script, and is restricted to a candidate list because
+  unrestricted it labels noisy OCR English as other languages.
+- The detected language is saved on each annotation as `language`. Remove the section to turn filtering off.

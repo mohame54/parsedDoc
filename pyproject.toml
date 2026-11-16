@@ -1,0 +1,40 @@
+[project]
+name = "real-document-corpus-builder"
+version = "0.1.0"
+description = "Configurable downloader, slicer and cataloguer for real-world document datasets, plus a Gemini Batch labeller"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "PyYAML>=6.0",
+  "Pillow>=10.0",
+  "pymupdf>=1.24",
+  "tqdm>=4.66",
+  "datasets>=5.2.0",
+  "google-genai>=1.0",
+  "jsonschema>=4.21",
+  "rapidocr>=3.10",
+  "onnxruntime>=1.18",
+  "py3langid>=0.4.0",
+  "torch>=2.14.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+train = [
+  "torch>=2.2",
+  "transformers>=4.50",
+  "peft>=0.13",
+  "tensorboard>=2.16",
+  "bitsandbytes>=0.43; sys_platform == 'linux'",
+]
+
+[project.scripts]
+corpus-builder = "corpus.cli:main"
+labeller = "labeller.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["corpus*", "labeller*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

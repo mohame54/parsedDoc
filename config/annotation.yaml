@@ -1,0 +1,104 @@
+# Labeller settings. Paths are relative to the project root (the parent of config/).
+
+data_root: ./data
+
+# Documents with more pages are excluded, never truncated.
+max_pages: 4
+
+# A PDF whose pages all carry at least this many text-layer characters is labelled from
+# that text instead of paying for a vision read.
+min_text_chars_per_page: 80
+
+# Batch chunking: one expired/failed job costs at most one chunk.
+batch_size: 500
+max_attempts: 3
+
+# Used only by `labeller plan` for the cost estimate (verify in the smoke test).
+tokens_per_page_estimate: 560
+
+# Local OCR (free, on this machine) runs before Stage 1 for scanned pages and images.
+# Born-digital PDFs with a text layer skip it. Results are cached in annotations/<doc>/ocr.json.
+ocr:
+  enabled: true
+  engine: rapidocr
+  model_type: server            # PP-OCRv5 server models (larger and slower than mobile)
+  ocr_version: PP-OCRv5
+  min_mean_confidence: 0.60     # below this the document is excluded before any Gemini call
+  min_chars_per_page: 20        # a page with less text than this is treated as blank
+
+# Stage 1: vision + OCR draft. Gemini corrects the draft and reports layout flags; it does not retype pages.
+stage1:
+  model: gemini-3.1-flash-lite   # listed for this API key; confirm quality/cost after the pilot
+  prompt_version: stage1_v3
+  max_output_tokens: 10240
+  send_images: true              # false = text-only Stage 1 (cheaper, cannot judge handwriting or checkboxes)
+
+# Stage 2: text only, builds the document's schema and fills it from the Stage 1 text.
+stage2:
+  model: gemini-3.5-flash        # gemini-2.5-flash returned 404 (retired for new users); confirm quality/cost after the pilot
+  prompt_version: stage2_v4      # v4-v6 also write a description for every field (used to build training prompts)
+  max_output_tokens: 10240
+  # true = send the page images for EVERY document (overrides visual.mode below). Leave it false and let
+  # the visual routing decide per document. On one test page, multimodal Stage 2 cost about 3x the input
+  # and 3x the output tokens of text-only Stage 2.
+  send_images: false
+
+# Visual routing: which documents get the multimodal Stage 2 (page images + tables, visual elements, layout,
+# relationships; prompt stage2_v6) and which stay text only (fields only; prompt stage2_v4/v5).
+#   never  - always text only        always - always multimodal
+#   auto   - multimodal only when the document has visual content, found by free local analysis
+visual:
+  mode: auto
+  # Local signals, as shares of the page area (set from real scans; untuned for your data):
+  min_image_area: 0.02    # embedded picture in a PDF (a full-page scan does not count)
+  min_color_area: 0.004   # coloured pixels: stamps, highlights, coloured rows, logos
+  min_shaded_area: 0.02   # light shaded blocks: table row / header backgrounds
+  min_blob_area: 0.015    # large solid dark regions: logos, photos, halftone headers (page-edge bands ignored)
+  pdf_annotations: true   # PDF highlight / stamp / ink annotations count
+  pdf_checkboxes: true    # PDF checkbox / radio form fields count
+  # Stage 1 layout flags that also send a scan to the multimodal Stage 2. has_handwriting is left out on
+  # purpose: it was wrong on typewritten pages in testing.
+  stage1_flags: [has_table, has_checkboxes, has_signature]
+
+# Language filter (local and free; runs before any Gemini call, then Stage 1's language code is checked too).
+# Detection uses py3langid for Latin/Cyrillic/Arabic/Devanagari text and Unicode script for the rest.
+language:
+  allowed:
+    - en
+    - es
+    - fr
+    - de
+    - it
+    - pt
+    - zh
+    - ja
+
+  unknown_policy: reject                          # reject | accept (too little text or low confidence)
+  mixed_language_policy: accept_if_primary_allowed  # accept_if_primary_allowed | accept_if_all_allowed | reject_mixed
+
+gates:
+  # Any illegible region in Stage 1 excludes the document.
+  max_illegible_regions: 0
+  # Blank forms are excluded (Stage 1 fill_level, and the PDF widget rule below).
+  exclude_blank_forms: true
+  blank_form_min_widgets: 5
+  blank_form_max_fill_ratio: 0.1
+  # Backstop for blank forms without fillable widgets: too few extracted values means blank.
+  # Documents with fewer than min_fields_for_ratio fields are exempt.
+  min_extracted_ratio: 0.25
+  min_fields_for_ratio: 8
+  # Share of the OCR draft's characters that Gemini really changed (markup, punctuation and case are
+  # ignored). Above this the draft is treated as too poor to trust. Untuned: check against hand review.
+  max_change_ratio: 0.30
+  # An extracted value must appear in the source text. Its words must be in order, with at most this
+  # many other words between them, so values split across columns or by [handwritten: ...] still match.
+  max_value_gap: 6
+
+# Source ids cleared for upload to Gemini. Sources marked phi_risk in config.yaml are
+# never uploaded unless listed here.
+phi_allowed_sources: []
+
+export:
+  train: 0.8
+  val: 0.1
+  seed: 42

@@ -1,0 +1,210 @@
+project:
+  name: real-world-document-corpus
+  output_dir: ./data
+  # Hard stop for all downloaded archives + extracted source files + rendered pages.
+  # Rendered files can increase storage substantially.
+  max_total_gb: 3
+  # Keep original source files. Recommended: true for reproducibility.
+  keep_originals: true
+  render_pdf_pages: true
+  pdf_dpi: 180
+  # Labelling only accepts documents of at most 4 pages (see config/annotation.yaml).
+  max_pages_per_document: 4
+  # Reject blank PDF forms (fillable widgets mostly unfilled) before rendering or labelling.
+  # Rejections are written to data/rejected.jsonl with the reason.
+  reject_blank_forms: true
+  min_widgets: 5
+  max_fill_ratio: 0.1
+  max_documents_per_source: 5000
+  max_files_per_source: 20000
+  # Set to 0 for no per-document size limit.
+  max_document_mb: 100
+  # Sampling: "first" is deterministic; "random" uses random_seed.
+  sampling: random
+  random_seed: 42
+  # Categories outside this list are still catalogued as "other". A category that is not listed here
+  # is turned into "other" even when a rule or a source names it, so every category used below must be listed.
+  allowed_categories:
+    - prescription
+    - intake_form
+    - fax
+    - purchase_order
+    - invoice
+    - receipt
+    - medical_record
+    - referral
+    - lab_form
+    - insurance_form
+    - general_form
+    - identity_document
+    - contract
+    - business_form
+    - handwritten_form
+    - other
+
+categories:
+  # Filename/path rules are checked in order; the first match wins. Source-level category is the fallback.
+  # Classification here is a weak first guess, not ground truth.
+  rules:
+    contract: ["contract", "nda", "agreement", "legal"]
+    business_form: ["business_form", "application_form"]
+    handwritten_form: ["handwritten", "handwriting"]
+    identity_document: ["identity", "passport", "national_id", "id_card"]
+    prescription: ["prescription", "rx", "medication", "drug_order"]
+    intake_form: ["intake", "patient_form", "new_patient", "registration_form"]
+    fax: ["fax", "facsimile", "transmission"]
+    purchase_order: ["purchase_order", "purchase order", "po_"]
+    invoice: ["invoice", "billing"]
+    receipt: ["receipt", "sroie"]
+    medical_record: ["medical_record", "clinical_note", "progress_note"]
+    referral: ["referral", "consult_request"]
+    lab_form: ["lab", "laboratory", "test_request"]
+    insurance_form: ["insurance", "claim"]
+    general_form: ["form", "funsd"]
+
+sources:
+  - id: nova_invoices_receipts
+    enabled: true
+    kind: zenodo
+    processor: generic
+    category: invoice
+    description: "813 Portuguese company invoices and receipts with field annotations."
+    record_id: "6371710"
+    max_documents: 100
+    max_download_gb: 0.5
+    license: "Check Zenodo rights metadata and original document permissions."
+    source_url: "https://zenodo.org/records/6371710"
+
+  # FUNSD: 199 scanned English forms (typewritten, noisy, many with handwriting). The processor is "generic"
+  # on purpose, so the forms go through local OCR -> Stage 1 -> Stage 2 like any scan, instead of using the
+  # dataset's own text labels (processor: funsd). The 30 forms already labelled came from this setup.
+  # The zip is small and already in data/raw/funsd/, so enabling this costs no new download. Raise
+  # max_documents (up to 199) to add more forms; already-collected forms are skipped, not duplicated.
+  - id: funsd
+    enabled: true
+    kind: direct
+    processor: generic
+    category: general_form
+    description: "FUNSD scanned forms benchmark (199 images)."
+    url: "https://guillaumejaume.github.io/FUNSD/dataset.zip"
+    max_documents: 190
+    max_download_gb: 0.5
+    license: "Check the original FUNSD terms before commercial use."
+    source_url: "https://guillaumejaume.github.io/FUNSD/"
+
+  # DocLayNet: 81,471 single-page, born-digital PDFs (financial reports, scientific articles, laws, tenders,
+  # manuals, patents; English, German, French, Japanese). The 8 GB archive is read with HTTP Range requests,
+  # so only the sampled pages are downloaded: the table of contents costs about 25 MB, each page about 50 KB.
+  # Each PDF has a text layer, so labelling needs no OCR; its JSON sidecar (category, text cells with
+  # coordinates) is saved next to it. The Hugging Face repo cannot be used: it only holds a loader script.
+  # Raise max_documents to take more (80,000 pages are available); max_download_gb caps the bytes fetched.
+  - id: doclaynet_pdfs
+    enabled: false
+    kind: remote_zip
+    processor: generic
+    category: other
+    description: "DocLayNet single-page PDFs with text layers and layout metadata."
+    url: "https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-doclaynet/1.0.0/DocLayNet_extra.zip"
+    include: ["PDF/*.pdf"]
+    sidecars: ["JSON/{stem}.json"]
+    max_documents: 200
+    max_download_gb: 1.0
+    license: "CDLA-Permissive-1.0 for the dataset; verify rights to the underlying pages (corporate reports, manuals, patents)."
+    source_url: "https://github.com/DS4SD/DocLayNet"
+
+  - id: xfund_fr
+    enabled: true
+    kind: huggingface
+    processor: generic
+    category: general_form
+    language: fr
+    description: "XFUND French forms with key-value and layout annotations."
+    dataset_id: "ianua/XFUND"
+    config_name: "French"
+    split: "train"
+    image_column: "image"
+    max_documents: 100
+    max_download_gb: 0.15
+    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
+    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+
+  - id: xfund_de
+    enabled: true
+    kind: huggingface
+    processor: generic
+    category: general_form
+    language: de
+    description: "XFUND German forms with key-value and layout annotations."
+    dataset_id: "ianua/XFUND"
+    config_name: "German"
+    split: "train"
+    image_column: "image"
+    max_documents: 100
+    max_download_gb: 0.15
+    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
+    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+
+  - id: xfund_it
+    enabled: true
+    kind: huggingface
+    processor: generic
+    category: general_form
+    language: it
+    description: "XFUND Italian forms with key-value and layout annotations."
+    dataset_id: "ianua/XFUND"
+    config_name: "Italian"
+    split: "train"
+    image_column: "image"
+    max_documents: 100
+    max_download_gb: 0.15
+    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
+    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+
+  - id: wildreceipt
+    enabled: true
+    kind: huggingface
+    processor: generic
+    category: receipt
+    language: en
+    description: "WildReceipt retail receipts with text, bounding boxes, and entity labels."
+    dataset_id: "kaydee/wildreceipt"
+    split: "train"
+    image_column: "image"
+    max_documents: 300
+    max_download_gb: 1.4
+    license: "Verify the upstream WildReceipt license and redistribution conditions."
+    source_url: "https://huggingface.co/datasets/kaydee/wildreceipt"
+
+
+  - id: omr_medical_forms
+    enabled: false  # Enable after verifying dataset license.
+    kind: huggingface
+    processor: generic
+    category: intake_form
+    description: "36 scanned medical forms including patient intake, consent and health assessments."
+    dataset_id: "saurabh1896/OMR-scanned-documents"
+    split: "train"
+    image_column: "image"
+    max_documents: 36
+    max_download_gb: 0.05
+    phi_risk: unknown
+    license: "Not clearly specified; verify before use."
+    source_url: "https://huggingface.co/datasets/saurabh1896/OMR-scanned-documents"
+
+  # Healthcare insurance claims
+  - id: symage_cms1500
+    enabled: true
+    kind: huggingface
+    processor: generic
+    category: insurance_form
+    language: en
+    description: "50 synthetic CMS-1500 health insurance claim forms with document images and field annotations."
+    dataset_id: "Symage/synthetic-us-forms-preview"
+    split: "train"
+    image_column: "image"
+    form_id_filter: "cms_1500_standard_02_12"
+    max_documents: 50
+    max_download_gb: 0.15
+    phi_risk: false
+    license: "CC BY 4.0"
+    source_url: "https://huggingface.co/datasets/Symage/synthetic-us-forms-preview"
