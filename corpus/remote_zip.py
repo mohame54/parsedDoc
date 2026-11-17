@@ -19,6 +19,7 @@ from typing import Any
 import requests
 from tqdm import tqdm
 
+from .progress import Progress
 from .utils import Budget
 
 DEFAULT_BLOCK = 256 * 1024
@@ -181,7 +182,7 @@ def download_remote_zip(source: dict[str, Any], destination: Path, budget: Budge
             chosen = select_members(list(infos), include, max_documents, seed)
             out(f"[remote_zip] {len(infos):,} members, {len(chosen):,} selected; "
                 f"listing cost {remote.bytes_fetched / 1e6:.1f} MB of {remote.size / 1e9:.1f} GB")
-            bar = tqdm(chosen, desc=f"{PurePosixPath(source['url']).name} fetch", unit="doc", leave=False)
+            bar = Progress(chosen, desc=f"{PurePosixPath(source['url']).name} fetch", unit="doc", leave=False)
             for name in bar:
                 bar.set_postfix(MB=round(remote.bytes_fetched / 1e6, 1), refresh=False)
                 stem = PurePosixPath(name).stem

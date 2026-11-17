@@ -10,6 +10,8 @@ fit a given max_length, and suggests one (the 99th percentile rounded up to a mu
 """
 from __future__ import annotations
 
+import sys
+
 import argparse
 import json
 import math
@@ -18,7 +20,7 @@ from collections import Counter
 from pathlib import Path
 
 from PIL import Image
-from tqdm import tqdm
+from corpus.progress import Progress
 
 from .processors import create_transform, merged_size, model_family
 
@@ -36,7 +38,7 @@ def image_report(root: Path, split: str, merge: str | None, multiple: int = 28, 
     with (root / f"{split}.jsonl").open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
     pages, final = Counter(), []
-    for record in tqdm(records, desc="measuring images", unit="doc", leave=False):
+    for record in Progress(records, desc="measuring images", unit="doc", leave=False):
         sizes = []
         for rel in record["images"]:
             with Image.open(root / rel) as image:
@@ -73,7 +75,7 @@ def length_report(root: Path, split: str, transform, samples: int = 300, max_len
     transform.fixed_length, transform.max_length = False, None   # measure, do not pad or reject
     dataset = DocumentDataset(root, split, DatasetProcessor(), samples_per_document=max(1, samples // 8))
     by_task: dict[str, list[int]] = {}
-    for i in tqdm(range(min(samples, len(dataset))), desc="tokenising examples", unit="example", leave=False):
+    for i in Progress(range(min(samples, len(dataset))), desc="tokenising examples", unit="example", leave=False):
         item = dataset[i]
         out = transform(item["images"], item["prompt"], item["label"])
         by_task.setdefault(item["task"], []).append(int(out["input_ids"].shape[-1]))
@@ -93,6 +95,8 @@ def length_report(root: Path, split: str, transform, samples: int = 300, max_len
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root")
     parser.add_argument("--split", default="train")

@@ -24,6 +24,7 @@ from .visual import add_stage1_flags
 from .visual import analyze as visual_analyze
 from .progress import RunProgress, inner_bar
 from .config import AnnotationConfig
+from corpus.progress import Progress
 from .processors import get_processor
 from .processors.generic import pdf_text_pages
 from .store import Store, read_json, utc_now, write_json
@@ -167,7 +168,7 @@ def prepare(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], dry_run:
     stage2_chars = 0
     multimodal_docs = 0
     multimodal_pages = 0
-    for doc_id, doc in tqdm(docs.items(), desc="routing documents", unit="doc", position=1, leave=False,
+    for doc_id, doc in Progress(docs.items(), desc="routing documents", unit="doc", position=1, leave=False,
                             disable=not progress):
         if store.status(doc_id) is not None:
             counts["already_decided"] += 1
@@ -212,7 +213,7 @@ def refresh_visual(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
     """Visual routing for every tracked document that is not excluded. With apply=True the result is saved
     for documents that have not reached Stage 2 yet (accepted ones keep the routing they were labelled with)."""
     rows = []
-    for doc_id, status in tqdm(sorted(store.all_statuses().items()), desc="visual analysis", unit="doc",
+    for doc_id, status in Progress(sorted(store.all_statuses().items()), desc="visual analysis", unit="doc",
                                leave=False, disable=not progress):
         doc = docs.get(doc_id)
         if doc is None or status["state"] == "excluded":
@@ -522,7 +523,7 @@ def _doc_line(store: Store, doc_id: str, outcome: str) -> str:
 
 
 def collect(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[str, dict],
-            out: Out = print, progress: bool = False, bars: dict[str, tqdm] | None = None) -> Counter[str]:
+            out: Out = print, progress: bool = False, bars: dict[str, Progress] | None = None) -> Counter[str]:
     """Polls every open batch of this stage and processes the finished ones.
 
     With progress=True each batch gets a live bar (documents done, state, elapsed). The bars dict is
@@ -542,7 +543,7 @@ def collect(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dic
         if progress:
             bar = bars.get(bdir.name)
             if bar is None:
-                bar = tqdm(total=total, desc=f"Stage {stage} batch {bdir.name}", position=1, leave=True, unit="doc")
+                bar = Progress(total=total, desc=f"Stage {stage} batch {bdir.name}", position=1, leave=True, unit="doc")
                 bars[bdir.name] = bar
             finished = [v for v in (info.get("succeeded"), info.get("failed")) if v is not None]
             if finished:
@@ -591,7 +592,7 @@ def watch(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[
           interval: int = 30, out: Out = print, progress: bool = False) -> Counter[str]:
     """Polls until every open batch for this stage has finished. Safe to interrupt and re-run."""
     total: Counter[str] = Counter()
-    bars: dict[str, tqdm] = {}
+    bars: dict[str, Progress] = {}
     try:
         while True:
             outcome = collect(cfg, store, api, stage, docs, out=out, progress=progress, bars=bars)
@@ -823,7 +824,8 @@ def _saved_results(store: Store, stage: int) -> dict[str, tuple[str | None, str 
     return results
 
 
-def reevaluate(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], out: Out = print) -> Counter[str]:
+def reevaluate(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], out: Out = print,
+               progress: bool = False) -> Counter[str]:
     """Re-runs the gates on Gemini outputs already saved in data/batches/. Makes no API calls.
 
     Use it after changing a gate in config/annotation.yaml. A gate change can loosen or tighten, so
@@ -838,14 +840,16 @@ def reevaluate(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], out: 
     repaired = repair_provenance(store, out)
     if repaired:
         outcome["provenance_repaired"] = repaired
-    _recheck_stage1(cfg, store, docs, _saved_results(store, 1), out, outcome)
-    _recheck_stage2(cfg, store, docs, _saved_results(store, 2), out, outcome)
+    _recheck_stage1(cfg, store, docs, _saved_results(store, 1), out, outcome, progress)
+    _recheck_stage2(cfg, store, docs, _saved_results(store, 2), out, outcome, progress)
     return outcome
 
 
 def _recheck_stage1(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
-                    results: dict[str, tuple[str | None, str | None]], out: Out, outcome: Counter[str]) -> None:
-    for doc_id, status in sorted(store.all_statuses().items()):
+                    results: dict[str, tuple[str | None, str | None]], out: Out, outcome: Counter[str],
+                    progress: bool = False) -> None:
+    for doc_id, status in Progress(sorted(store.all_statuses().items()), desc="re-checking stage 1", unit="doc",
+                                   leave=False, disable=not progress):
         if status.get("origin") != "gemini_stage1" or doc_id not in docs:
             continue  # documents labelled from native text never went through Stage 1
         state, reason = status["state"], status.get("reason") or ""
@@ -882,8 +886,10 @@ def _recheck_stage1(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
 
 
 def _recheck_stage2(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
-                    results: dict[str, tuple[str | None, str | None]], out: Out, outcome: Counter[str]) -> None:
-    for doc_id, status in sorted(store.all_statuses().items()):
+                    results: dict[str, tuple[str | None, str | None]], out: Out, outcome: Counter[str],
+                    progress: bool = False) -> None:
+    for doc_id, status in Progress(sorted(store.all_statuses().items()), desc="re-checking stage 2", unit="doc",
+                                   leave=False, disable=not progress):
         state, reason = status["state"], status.get("reason") or ""
         if not (state == "accepted" or (state == "excluded" and reason.startswith(STAGE2_SETTING_REASONS))):
             continue

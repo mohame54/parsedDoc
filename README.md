@@ -110,6 +110,8 @@ and `chart_trend` (trend, highest value and a labelled value, computed from the 
 with estimated points are skipped). Previously labelled documents keep their v1/v2/v6 annotations and have no figures
 until Stage 2 is run again on them.
 
+Progress shows as a live bar in a terminal. Where there is no terminal (a notebook `!` command, a pipe or a log file), it prints one line every tenth of the work instead, so the progress stays visible.
+
 Downloads show progress: an overall `sources` bar, one bar per download (bytes for archives, documents for Hugging
 Face and `remote_zip` sources, with the MB fetched), and a `catalogue` bar while files are hashed, classified and
 rendered.

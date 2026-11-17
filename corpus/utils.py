@@ -7,7 +7,7 @@ from pathlib import Path
 
 import requests
 from PIL import Image
-from tqdm import tqdm
+from .progress import Progress
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 DOC_EXTS = IMAGE_EXTS | {".pdf"}
@@ -36,7 +36,7 @@ def safe_extract_zip(archive: Path, destination: Path, progress: bool = True) ->
             if target != base and base not in target.parents:
                 raise ValueError(f"Unsafe ZIP member path: {member.filename}")
         total = sum(m.file_size for m in members)
-        with tqdm(total=total, desc=f"extract {archive.name}", unit="B", unit_scale=True, leave=False,
+        with Progress(total=total, desc=f"extract {archive.name}", unit="B", unit_scale=True, leave=False,
                   disable=not progress) as bar:
             for member in members:
                 zf.extract(member, destination)
@@ -96,7 +96,7 @@ def download_stream(url: str, destination: Path, budget: Budget, max_bytes: int)
             raise RuntimeError(f"Download is {bytes_to_gb(declared):.2f} GB, above source limit")
         budget.check(declared)
         written = 0
-        with tmp.open("wb") as f, tqdm(
+        with tmp.open("wb") as f, Progress(
             total=declared or None, unit="B", unit_scale=True, desc=destination.name
         ) as bar:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -124,15 +124,26 @@ def classify(path: Path, source_category: str, rules: dict[str, list[str]],
 UNFILLED_VALUES = {"", "off", "0", "false", "no"}
 
 
+def _pymupdf():
+    """PyMuPDF with MuPDF's own error printing switched off: it prints one line per odd form widget otherwise.
+    Imports the `pymupdf` name (the `fitz` alias is deprecated)."""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        try:
+            import fitz
+        except ImportError as exc:
+            raise RuntimeError("PyMuPDF is required: pip install pymupdf") from exc
+    fitz.TOOLS.mupdf_display_errors(False)
+    return fitz
+
+
 def pdf_form_fill(pdf_path: Path) -> dict | None:
     """Counts fillable widgets and how many carry a value. None if the PDF has no widgets or cannot be read.
 
     A checkbox/text value of "", None, "Off", "0" or "false" counts as unfilled.
     """
-    try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError("PyMuPDF is required: pip install pymupdf") from exc
+    fitz = _pymupdf()
     try:
         with fitz.open(pdf_path) as doc:
             widgets = [w for page in doc for w in (page.widgets() or [])]
@@ -156,10 +167,7 @@ def is_blank_form(form_fill: dict, project: dict) -> bool:
 
 def pdf_page_count(pdf_path: Path) -> int | None:
     """Real page count, independent of how many pages are rendered. None if unreadable."""
-    try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError("PyMuPDF is required: pip install pymupdf") from exc
+    fitz = _pymupdf()
     try:
         with fitz.open(pdf_path) as doc:
             return len(doc)
@@ -168,10 +176,7 @@ def pdf_page_count(pdf_path: Path) -> int | None:
 
 
 def render_pdf(pdf_path: Path, page_dir: Path, dpi: int, max_pages: int) -> list[Path]:
-    try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError("PyMuPDF is required for PDF rendering: pip install pymupdf") from exc
+    fitz = _pymupdf()
     page_dir.mkdir(parents=True, exist_ok=True)
     rendered = []
     with fitz.open(pdf_path) as doc:

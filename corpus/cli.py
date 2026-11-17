@@ -15,6 +15,7 @@ from .datasets import (
     download_zenodo
 )
 from .labels import attach_xfund
+from .progress import Progress
 from .remote_zip import download_remote_zip
 
 from .utils import (
@@ -41,6 +42,8 @@ DOC_EXTS = IMAGE_EXTS | {".pdf"}
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(description="Download, slice and catalogue real-world document datasets.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--source", action="append", help="Source ID; repeat to select multiple. Default: all enabled.")
@@ -82,7 +85,7 @@ def main() -> None:
     for s_ in sources:
         if s_.get("visual_mode") not in (None, "auto", "always", "never"):
             raise SystemExit(f"{s_['id']}: visual_mode must be auto, always or never")
-    source_bar = tqdm(sources, desc="sources", unit="source", position=0)
+    source_bar = Progress(sources, desc="sources", unit="source", position=0)
     for source in source_bar:
         sid = source["id"]
         source_bar.set_postfix(now=sid, refresh=True)
@@ -151,9 +154,11 @@ def main() -> None:
 
             # Count extracted payloads too: ZIP expansion can be much larger than the archive.
             # This keeps the configured total storage budget meaningful after decompression.
+            tqdm.write(f"[disk] {sid}: measuring storage used so far")
             budget.rescan()
             budget.check()
 
+            tqdm.write(f"[files] {sid}: finding documents")
             candidates = discover_files(source_extracted, int(project.get("max_files_per_source", 20000)))
             # For word-crop corpora, every image is an individual sample; for PDFs, one PDF is one document.
             doc_limit = args.max_documents or int(source.get("max_documents", project.get("max_documents_per_source", 5000)))
@@ -163,7 +168,7 @@ def main() -> None:
             candidates = candidates[:doc_limit]
 
             accepted = 0
-            catalogue = tqdm(candidates, desc=f"{sid} catalogue", unit="doc", position=1, leave=False)
+            catalogue = Progress(candidates, desc=f"{sid} catalogue", unit="doc", position=1, leave=False)
             for path in catalogue:
                 if project.get("max_document_mb", 0) and path.stat().st_size > float(project["max_document_mb"]) * 1024**2:
                     continue
@@ -229,7 +234,7 @@ def main() -> None:
     source_bar.close()
 
     # Re-apply the blank-form rule to rows from earlier runs (they are skipped as seen duplicates above).
-    for doc_id, row in list(rows_by_id.items()):
+    for doc_id, row in Progress(list(rows_by_id.items()), desc="re-checking blank forms", unit="doc", leave=False):
         if row.get("file_type") != "pdf":
             continue
         if "form_fill" not in row:  # manifests written before form_fill existed

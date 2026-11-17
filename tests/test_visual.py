@@ -289,3 +289,30 @@ def test_plan_and_visual_command_report_the_routing(two_docs):
     loose = dataclasses.replace(cfg, visual=VisualConfig(mode="auto", min_shaded_area=0.5))
     refresh_visual(loose, store, docs, apply=True)
     assert store.status("src:shaded")["visual"]["multimodal"] is False
+
+
+def test_fast_opening_matches_pillow_away_from_the_borders_and_is_much_faster():
+    import time
+
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    from labeller.visual import _opening
+
+    rng = np.random.default_rng(3)
+    mask = np.zeros((300, 400), dtype=np.uint8)
+    mask[40:140, 60:200] = 255                       # a solid block: must survive
+    mask[200:204, 50:350] = 255                      # a thin rule: must be removed
+    mask[rng.random(mask.shape) > 0.995] = 255       # speckle: must be removed
+    image = Image.fromarray(mask)
+    for size in (7, 25):
+        start = time.perf_counter()
+        fast = np.asarray(_opening(image, size))
+        t_fast = time.perf_counter() - start
+        start = time.perf_counter()
+        slow = np.asarray(image.filter(ImageFilter.MinFilter(size)).filter(ImageFilter.MaxFilter(size)))
+        t_slow = time.perf_counter() - start
+        r = size  # compare away from the border band, where the two treat missing neighbours differently
+        assert (fast[r:-r, r:-r] == slow[r:-r, r:-r]).all(), size
+        assert fast[90, 100] == 255 and fast[202, 100] == 0     # block kept, thin rule gone
+        assert t_fast < t_slow

@@ -28,7 +28,7 @@ from pathlib import Path
 from .config import AnnotationConfig
 from .pipeline import page_paths
 from .store import Store, read_json, safe_name, write_json
-from tqdm import tqdm
+from corpus.progress import Progress
 
 
 def export(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], include_unverified: bool = False,
@@ -40,7 +40,7 @@ def export(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], include_u
 
     records: list[dict] = []
     accepted = [st for st in statuses.values() if st["state"] == "accepted"]
-    for st in tqdm(accepted, desc="export", unit="doc", leave=False, disable=not progress):
+    for st in Progress(accepted, desc="export", unit="doc", leave=False, disable=not progress):
         doc = docs.get(st["doc_id"])
         annotation = read_json(store.ann_dir(st["doc_id"]) / "annotation.json")
         if doc is None or annotation is None:

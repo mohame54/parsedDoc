@@ -8,6 +8,8 @@ adapter is supplied for the target model, pass one through SFTConfig.batch_adapt
 """
 from __future__ import annotations
 
+import sys
+
 import argparse
 import logging
 
@@ -19,6 +21,7 @@ from .dataset import make_loader
 from .model import DeepSeekOCR
 from .optim import build_optimizer
 from .processors import DatasetProcessor, create_transform, model_family
+log = logging.getLogger("train.sft")
 from .sft import SFTConfig, train_ddp, train_fsdp2, train_single
 
 
@@ -78,6 +81,8 @@ def build_transform(args: argparse.Namespace):
 
 
 def main(argv: list[str] | None = None) -> dict[str, int] | None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     device = dd.init_distributed()          # first: the loader shards by the process group
@@ -86,12 +91,15 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
         if args.quant is not None and args.strategy == "fsdp2":
             raise SystemExit("--quant is not compatible with --strategy fsdp2; use ddp or single")
 
+        log.info("loading tokenizer and transform (%s, mode %s)", args.model_id, args.ocr_mode)
         transform = build_transform(args)
+        log.info("building the training loader from %s", args.root)
         loader = make_loader(
             args.root, split="train", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
             transform=transform, batch_size=args.batch_size, num_workers=args.workers,
         )
 
+        log.info("loading the model %s (the first run downloads its weights)", args.model_id)
         # Master weights stay fp32 (mixed precision casts them); quantized weights use the compute dtype.
         load_dtype = dtype if args.quant is not None else torch.float32
         extra = {"device_map": {"": str(device)}} if args.quant is not None else {}
@@ -100,7 +108,9 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             dtype=load_dtype, quantization=args.quant, **extra,
         )
         if args.lora:
+            log.info("adding LoRA adapters (r=%d)", args.lora_r)
             model.add_lora(r=args.lora_r)
+        log.info("starting training: strategy %s, %d epoch(s)", args.strategy, args.epochs)
 
         def make_optimizer(named_params):
             if args.optimizer == "adamw":

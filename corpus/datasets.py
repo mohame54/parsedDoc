@@ -10,6 +10,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from .labels import entities_from_row, parse_answers, write_qa_sidecar, write_sidecar
+from .progress import Progress
 from .utils import Budget, download_stream
 
 
@@ -96,7 +97,7 @@ def download_grouped_qa(source: dict[str, Any], destination: Path, max_documents
     out_dir.mkdir(parents=True, exist_ok=True)
     by_digest: dict[str, dict[str, Any]] = {}      # digest -> {"path": Path, "qa": [...]}
     written = scanned = 0
-    bar = tqdm(total=max_documents, desc=f"{source['id']} download", unit="img", leave=False)
+    bar = Progress(total=max_documents, desc=f"{source['id']} download", unit="img", leave=False)
     try:
         for idx, row in enumerate(ds):
             scanned += 1
@@ -155,7 +156,7 @@ def download_huggingface(source: dict[str, Any], destination: Path, max_document
     out_dir.mkdir(parents=True, exist_ok=True)
     result: list[Path] = []
     written = scanned = 0
-    bar = tqdm(total=max_documents, desc=f"{source['id']} download", unit="doc", leave=False)
+    bar = Progress(total=max_documents, desc=f"{source['id']} download", unit="doc", leave=False)
     try:
         for idx, row in enumerate(ds):
             if len(result) >= max_documents:

@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from corpus.progress import Progress
 
 from . import distributed as dd
 from .dataset import set_epoch
@@ -198,7 +198,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, amp_dty
     total = torch.zeros((), device=device)
     count = 0
     try:
-        for batch in tqdm(loader, desc="eval", unit="batch", leave=False, disable=None if dd.is_main() else True):
+        for batch in Progress(loader, desc="eval", unit="batch", leave=False, disable=not dd.is_main()):
             batch = _prepare(batch, adapter, device)
             with dd.autocast(device, amp_dtype):
                 total += model(**batch).loss.float()

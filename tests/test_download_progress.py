@@ -78,7 +78,7 @@ def test_zip_extraction_reports_progress_and_still_blocks_path_traversal(tmp_pat
         zf.writestr("a/one.txt", "hello")
     safe_extract_zip(good, tmp_path / "out")
     assert (tmp_path / "out/a/one.txt").read_text() == "hello"
-    assert "extract ok.zip" in capsys.readouterr().err         # a bar was drawn
+    assert "extract ok.zip" in capsys.readouterr().out         # no terminal here: a progress line is printed
 
     bad = tmp_path / "bad.zip"
     with zipfile.ZipFile(bad, "w") as zf:
@@ -96,3 +96,76 @@ def test_training_log_lines_show_step_total_percent_and_eta(caplog):
     logger.close()
     assert "step 10/100 (10%)" in caplog.text and "step 20/100 (20%)" in caplog.text and "eta" in caplog.text
     assert "loss=1.2" in caplog.text and "grad_norm=0.6" in caplog.text
+
+
+def test_progress_prints_plain_lines_when_no_terminal_is_attached(capsys):
+    from corpus.progress import Progress
+
+    bar = Progress(total=100, desc="work", unit="doc")
+    for _ in range(100):
+        bar.update(1)
+    bar.close()
+    out = capsys.readouterr().out
+    assert "work: 11/100" not in out                     # one line per tenth of the work, not per item
+    assert "work: 10/100 doc (10%)" in out and "work: 100/100 doc (100%)" in out
+
+    items = list(Progress(["a", "b", "c"], desc="items", unit="it"))
+    assert items == ["a", "b", "c"]                       # iterating counts the items and keeps them
+    quiet = Progress(total=4, desc="silent", disable=True)
+    quiet.update(4)
+    assert "silent" not in capsys.readouterr().out
+
+
+def test_progress_bar_counts_can_be_set_directly_like_the_labeller_does(capsys):
+    from corpus.progress import Progress
+
+    bar = Progress(total=6, desc="stage", unit="doc")
+    bar.n = 4
+    bar.set_postfix_str("running")
+    bar.refresh()
+    assert bar.n == 4
+    bar.close()
+    assert "stage: 4/6" in capsys.readouterr().out
+
+
+def test_progress_without_a_terminal_announces_itself_and_never_goes_quiet_for_long(capsys, monkeypatch):
+    from corpus import progress as progress_module
+    from corpus.progress import Progress
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(progress_module.time, "monotonic", lambda: clock["t"])
+    bar = Progress(total=1000, desc="slow", unit="doc")           # a tenth of the work is 100 documents
+    assert "slow: starting (1000 doc)" in capsys.readouterr().out    # visible before any item finishes
+    clock["t"] = 3.0
+    bar.update(5)
+    assert capsys.readouterr().out == ""                           # neither a tenth nor ten seconds yet
+    clock["t"] = 11.0
+    bar.update(5)
+    out = capsys.readouterr().out
+    assert "slow: 10/1000 doc (1%)" in out and "doc/s" in out and "eta" in out and "0:00:11" in out
+    clock["t"] = 12.0
+    bar.update(1)
+    assert capsys.readouterr().out == ""                           # the next line waits for the interval again
+
+
+def test_a_polled_bar_reports_through_refresh_even_when_only_its_count_and_text_change(capsys, monkeypatch):
+    """The Gemini batch wait sets `n`, a status text and calls refresh(); it never calls update()."""
+    from corpus import progress as progress_module
+    from corpus.progress import Progress
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(progress_module.time, "monotonic", lambda: clock["t"])
+    bar = Progress(total=2, desc="Stage 2 batch", unit="doc", leave=True)
+    capsys.readouterr()
+    clock["t"] = 4.0
+    bar.set_postfix_str("running")
+    bar.refresh()
+    assert capsys.readouterr().out == ""                           # polled again too soon: no line
+    clock["t"] = 31.0
+    bar.set_postfix_str("running · 0:00:31")
+    bar.refresh()
+    assert "Stage 2 batch: 0/2 doc (0%)" in capsys.readouterr().out
+    bar.n = 2
+    clock["t"] = 32.0
+    bar.refresh()
+    assert "Stage 2 batch: 2/2 doc (100%)" in capsys.readouterr().out

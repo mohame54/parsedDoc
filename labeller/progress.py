@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from tqdm import tqdm
 
+from corpus.progress import Progress
+
 RUN_STEPS = [
     "prepare",
     "OCR",
@@ -26,7 +28,7 @@ class RunProgress:
         self.enabled = enabled
         self.total = len(steps or RUN_STEPS)
         self.bar = (
-            tqdm(total=self.total, position=0, desc="labeller", unit="step",
+            Progress(total=self.total, position=0, desc="labeller", unit="step",
                  bar_format="{desc}: {n_fmt}/{total_fmt} {bar} {postfix} {elapsed}")
             if enabled else None
         )
@@ -46,6 +48,6 @@ class RunProgress:
             self.bar.close()
 
 
-def inner_bar(total: int, desc: str, position: int, unit: str = "doc") -> tqdm:
+def inner_bar(total: int, desc: str, position: int, unit: str = "doc") -> Progress:
     """A bar that disappears when finished, so the terminal keeps only the run bar and batch bars."""
-    return tqdm(total=total, desc=desc, position=position, unit=unit, leave=False)
+    return Progress(total=total, desc=desc, position=position, unit=unit, leave=False)

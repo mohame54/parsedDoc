@@ -16,7 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw
 
 from .config import VisualConfig
 
@@ -47,6 +48,32 @@ def _clear_edge_blobs(mask: Image.Image) -> Image.Image:
     return mask
 
 
+def _slide(values: np.ndarray, radius: int, combine, fill: int) -> np.ndarray:
+    """Minimum or maximum over a square window of side 2*radius+1, done as one pass along the rows and one along
+    the columns. Outside the image the neutral value `fill` is used, so a blob touching the edge is not eroded."""
+    width = values.shape[1]
+    padded = np.pad(values, ((0, 0), (radius, radius)), constant_values=fill)
+    rows = padded[:, :width].copy()
+    for shift in range(1, 2 * radius + 1):
+        rows = combine(rows, padded[:, shift:shift + width])
+    height = values.shape[0]
+    padded = np.pad(rows, ((radius, radius), (0, 0)), constant_values=fill)
+    out = padded[:height].copy()
+    for shift in range(1, 2 * radius + 1):
+        out = combine(out, padded[shift:shift + height])
+    return out
+
+
+def _opening(mask: Image.Image, size: int) -> Image.Image:
+    """Morphological opening of a 0/255 mask with a size x size square: erode, then dilate. It removes anything
+    thinner than the window (text strokes, rules) and keeps solid blocks. Pillow's MinFilter / MaxFilter do the
+    same but sort the whole window for every pixel, which took about 0.5 s per page."""
+    radius = size // 2
+    values = np.asarray(mask, dtype=np.uint8)
+    eroded = _slide(values, radius, np.minimum, 255)
+    return Image.fromarray(_slide(eroded, radius, np.maximum, 0))
+
+
 def page_signals(image: Image.Image, cfg: VisualConfig) -> dict[str, float]:
     """Shares of the page that are coloured, lightly shaded, or covered by large dark blobs."""
     image = image.convert("RGB")
@@ -72,11 +99,11 @@ def page_signals(image: Image.Image, cfg: VisualConfig) -> dict[str, float]:
 
     thin = _odd(max(5, round(0.012 * WORK_WIDTH)))     # removes text strokes and rules
     dark = gray.point(lambda x: 255 if x < background - 60 else 0)
-    blobs = _clear_edge_blobs(dark.filter(ImageFilter.MinFilter(thin)).filter(ImageFilter.MaxFilter(thin)))
+    blobs = _clear_edge_blobs(_opening(dark, thin))
 
     wide = _odd(round(0.04 * WORK_WIDTH))               # light shading must form wide solid blocks
     light = gray.point(lambda x: 255 if background - 55 <= x <= background - 10 else 0)
-    shaded = _clear_edge_blobs(light.filter(ImageFilter.MinFilter(wide)).filter(ImageFilter.MaxFilter(wide)))
+    shaded = _clear_edge_blobs(_opening(light, wide))
 
     return {"color": _share(coloured), "shaded": _share(shaded), "blob": _share(blobs)}
 

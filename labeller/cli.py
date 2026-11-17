@@ -28,6 +28,8 @@ from .store import Store
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(prog="labeller", description="Gemini Batch labeller for the document corpus.")
     parser.add_argument("--config", default="config/annotation.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -103,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
         rows = refresh_visual(cfg, store, docs, apply=args.apply, progress=True)
         _print_visual(cfg, rows)
     elif args.cmd == "reevaluate":
-        result = reevaluate(cfg, store, docs)
+        result = reevaluate(cfg, store, docs, progress=True)
         print(f"Reevaluated: {dict(result)}")
         if result.get("stage1_stage1_ok"):
             print("Documents that now pass Stage 1 are waiting for Stage 2. Run `labeller run` to label them.")

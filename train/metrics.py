@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from tqdm import tqdm
+from corpus.progress import Progress
 
 log = logging.getLogger("train.sft")
 
@@ -35,8 +35,7 @@ class MetricLogger:
         if not self.enabled:
             return
         # disable=None: no bar when output is a file or pipe (background runs), so logs stay readable
-        self.bar = tqdm(total=total_steps, initial=initial_step, desc="sft", unit="step", dynamic_ncols=True,
-                        disable=None)
+        self.bar = Progress(total=total_steps, initial=initial_step, desc="sft", unit="step", dynamic_ncols=True)
         if tensorboard and log_dir is not None:
             from torch.utils.tensorboard import SummaryWriter
 
