@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections import Counter
 
 from pathlib import Path
 
 from . import describe
+from corpus.logs import add_arguments, configure
+
 from .config import load_config, load_dotenv
 from .export import export
 from .gemini import BatchApi
 from .ocr import RapidOcrEngine
-from tqdm import tqdm
 
 from .pipeline import (
     collect,
@@ -26,12 +28,13 @@ from .pipeline import (
 )
 from .store import Store
 
+log = logging.getLogger("labeller")
+
 
 def main(argv: list[str] | None = None) -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(prog="labeller", description="Gemini Batch labeller for the document corpus.")
     parser.add_argument("--config", default="config/annotation.yaml")
+    add_arguments(parser)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("plan", help="Route documents and estimate cost. Writes nothing.")
     sub.add_parser("prepare", help="Route documents locally (free). Safe to re-run.")
@@ -63,6 +66,7 @@ def main(argv: list[str] | None = None) -> None:
     p_dcol = sub.add_parser("describe-collect", help="Write descriptions.json once the describe job has finished.")
     p_dcol.add_argument("--out-dir", default="data/descriptions")
     args = parser.parse_args(argv)
+    configure(args)
 
     cfg = load_config(args.config)
     load_dotenv(cfg.project_root / ".env")
@@ -81,22 +85,22 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "status":
         _print_status(store)
     elif args.cmd == "ocr":
-        result = ocr_step(cfg, store, _engine_factory(cfg), docs, out=tqdm.write, progress=True)
+        result = ocr_step(cfg, store, _engine_factory(cfg), docs, progress=True)
         print(f"OCR: {dict(result)}")
     elif args.cmd == "submit":
         api = BatchApi()
-        count = submit(cfg, store, api, args.stage, docs, limit=args.limit, out=tqdm.write, progress=True)
+        count = submit(cfg, store, api, args.stage, docs, limit=args.limit, progress=True)
         print(f"Submitted {count} requests for stage {args.stage}.")
     elif args.cmd == "collect":
         api = BatchApi()
         if args.watch:
-            result = watch(cfg, store, api, args.stage, docs, interval=args.interval, out=tqdm.write, progress=True)
+            result = watch(cfg, store, api, args.stage, docs, interval=args.interval, progress=True)
         else:
-            result = collect(cfg, store, api, args.stage, docs, out=tqdm.write, progress=True)
+            result = collect(cfg, store, api, args.stage, docs, progress=True)
         print(f"Collect stage {args.stage}: {dict(result)}")
     elif args.cmd == "run":
         summary = run_all(cfg, store, docs, _engine_factory(cfg), BatchApi, limit=args.limit,
-                          interval=args.interval, out=print, progress=True)
+                          interval=args.interval, progress=True)
         export_summary = export(cfg, store, docs, include_unverified=args.include_unverified,
                          copy_images=not args.no_copy_images, progress=True)
         print(f"Run finished. Steps: {summary}")
@@ -122,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def _engine_factory(cfg):
     def make_engine():
-        print(f"Loading RapidOCR ({cfg.ocr.ocr_version}, {cfg.ocr.model_type}); first run downloads the models.")
+        log.info(f"Loading RapidOCR ({cfg.ocr.ocr_version}, {cfg.ocr.model_type}); first run downloads the models.")
         return RapidOcrEngine(model_type=cfg.ocr.model_type, ocr_version=cfg.ocr.ocr_version)
 
     return make_engine

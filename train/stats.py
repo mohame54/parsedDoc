@@ -20,6 +20,7 @@ from collections import Counter
 from pathlib import Path
 
 from PIL import Image
+from corpus.logs import add_arguments, configure
 from corpus.progress import Progress
 
 from .processors import create_transform, merged_size, model_family
@@ -95,8 +96,6 @@ def length_report(root: Path, split: str, transform, samples: int = 300, max_len
 
 
 def main(argv: list[str] | None = None) -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root")
     parser.add_argument("--split", default="train")
@@ -107,7 +106,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model-id", help="Hugging Face model whose processor tokenises the examples")
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--samples", type=int, default=300)
+    add_arguments(parser)
     args = parser.parse_args(argv)
+    configure(args)
 
     root = Path(args.root)
     report = {"images": image_report(root, args.split, args.merge)}

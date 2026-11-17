@@ -16,6 +16,8 @@ import logging
 import torch
 from transformers import AutoProcessor
 
+from corpus.logs import add_arguments, configure
+
 from . import distributed as dd
 from .dataset import make_loader
 from .model import DeepSeekOCR
@@ -64,6 +66,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=200)
     p.add_argument("--no-tensorboard", action="store_true")
+    add_arguments(p)
     return p.parse_args(argv)
 
 
@@ -81,10 +84,8 @@ def build_transform(args: argparse.Namespace):
 
 
 def main(argv: list[str] | None = None) -> dict[str, int] | None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     args = parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    configure(args)
     device = dd.init_distributed()          # first: the loader shards by the process group
     try:
         dtype, _ = dd.resolve_precision(args.precision, device)

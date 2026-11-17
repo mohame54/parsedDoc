@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import Counter
@@ -15,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from tqdm import tqdm
 
 from . import gemini, ocr, prompts, schemas
 from .evidence import attach_boxes, build_line_index
@@ -39,6 +39,7 @@ from .validate import (
 )
 
 Out = Callable[[str], None]
+log = logging.getLogger("labeller")
 
 
 def load_manifest(cfg: AnnotationConfig) -> dict[str, dict]:
@@ -230,7 +231,7 @@ def refresh_visual(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
 
 
 def ocr_step(cfg: AnnotationConfig, store: Store, engine_factory: Callable[[], Any], docs: dict[str, dict],
-             out: Out = print, progress: bool = False) -> Counter[str]:
+             out: Out = log.info, progress: bool = False) -> Counter[str]:
     """Runs local OCR for every needs_ocr document (free). The engine is built only if there is work."""
     outcome: Counter[str] = Counter()
     pending = sorted((s for s in store.all_statuses().values() if s["state"] == "needs_ocr"),
@@ -415,7 +416,7 @@ def _build_line(stage: int, cfg: AnnotationConfig, store: Store, api: Any, doc: 
 
 
 def submit(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[str, dict],
-           limit: int | None = None, out: Out = print, progress: bool = False) -> int:
+           limit: int | None = None, out: Out = log.info, progress: bool = False) -> int:
     scfg = cfg.stage1 if stage == 1 else cfg.stage2
     pending = sorted((s for s in store.all_statuses().values() if s["state"] == f"needs_stage{stage}"),
                      key=lambda s: s["doc_id"])
@@ -491,11 +492,8 @@ def _mark_awaiting(store: Store, stage: int, job: dict) -> None:
 
 
 def _say(out: Out, progress: bool, message: str) -> None:
-    """Print without breaking an active tqdm bar."""
-    if progress:
-        tqdm.write(message)
-    else:
-        out(message)
+    """One event line to the caller's `out`, which logs by default."""
+    out(message)
 
 
 def _elapsed(submitted_at: str | None) -> str:
@@ -524,7 +522,7 @@ def _doc_line(store: Store, doc_id: str, outcome: str) -> str:
 
 
 def collect(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[str, dict],
-            out: Out = print, progress: bool = False, bars: dict[str, Progress] | None = None) -> Counter[str]:
+            out: Out = log.info, progress: bool = False, bars: dict[str, Progress] | None = None) -> Counter[str]:
     """Polls every open batch of this stage and processes the finished ones.
 
     With progress=True each batch gets a live bar (documents done, state, elapsed). The bars dict is
@@ -590,7 +588,7 @@ def collect(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dic
 
 
 def watch(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[str, dict],
-          interval: int = 30, out: Out = print, progress: bool = False) -> Counter[str]:
+          interval: int = 30, out: Out = log.info, progress: bool = False) -> Counter[str]:
     """Polls until every open batch for this stage has finished. Safe to interrupt and re-run."""
     total: Counter[str] = Counter()
     bars: dict[str, Progress] = {}
@@ -613,13 +611,13 @@ def watch(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict[
 
 def run_all(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], engine_factory: Callable[[], Any],
             api_factory: Callable[[], Any], limit: int | None = None, interval: int = 30,
-            out: Out = print, progress: bool = False) -> dict[str, Any]:
+            out: Out = log.info, progress: bool = False) -> dict[str, Any]:
     """Runs prepare, OCR, Stage 1 and Stage 2 end to end, with a run bar showing the current step.
 
     Export is left to the caller. The Gemini client is created only when the first submit runs,
     so a run with nothing to send never needs the API key.
     """
-    say = tqdm.write if progress else out
+    say = out
     run = RunProgress(progress)
     summary: dict[str, Any] = {}
     api_holder: dict[str, Any] = {}
@@ -768,7 +766,7 @@ def _provenance(cfg: AnnotationConfig, status: dict, stage2_version: str) -> dic
     }
 
 
-def repair_provenance(store: Store, out: Out = print) -> int:
+def repair_provenance(store: Store, out: Out = log.info) -> int:
     """Fixes annotations labelled before models were recorded: reads the model each batch job really ran
     from data/batches/*/job.json. Returns the number of annotations corrected."""
     job_info: dict[str, dict] = {}
@@ -825,7 +823,7 @@ def _saved_results(store: Store, stage: int) -> dict[str, tuple[str | None, str 
     return results
 
 
-def reevaluate(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], out: Out = print,
+def reevaluate(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], out: Out = log.info,
                progress: bool = False) -> Counter[str]:
     """Re-runs the gates on Gemini outputs already saved in data/batches/. Makes no API calls.
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import io
 from pathlib import Path
@@ -7,7 +9,8 @@ from typing import Any
 
 import requests
 from PIL import Image
-from tqdm import tqdm
+
+log = logging.getLogger("corpus")
 
 from .labels import entities_from_row, parse_answers, write_qa_sidecar, write_sidecar
 from .progress import Progress
@@ -86,7 +89,7 @@ def _open_stream(source: dict[str, Any]):
 
 def download_grouped_qa(source: dict[str, Any], destination: Path, max_documents: int,
                         budget: Budget | None = None, max_bytes: int | None = None,
-                        out=tqdm.write) -> list[Path]:
+                        out=log.info) -> list[Path]:
     """Datasets with one row per question (ChartQA): each distinct image is saved once, and every question about
     it goes into `<stem>.qa.json`. Images are de-duplicated by the hash of their bytes, so a chart seen again on a
     later row adds its question to the existing file instead of a new document. `max_documents` counts images."""
@@ -138,7 +141,7 @@ def download_grouped_qa(source: dict[str, Any], destination: Path, max_documents
 
 def download_huggingface(source: dict[str, Any], destination: Path, max_documents: int,
                          budget: Budget | None = None, max_bytes: int | None = None,
-                         out=tqdm.write) -> list[Path]:
+                         out=log.info) -> list[Path]:
     """Streams images from a Hugging Face dataset. Honours `config_name`, an optional row filter
     (`form_id_filter` on column `filter_column`, default "form_id"), the document cap and the byte cap."""
     try:

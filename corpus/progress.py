@@ -2,7 +2,7 @@
 
 tqdm redraws its bar with carriage returns. A pipe or notebook output does not render those as lines, so the
 bar looks frozen or is missing altogether. On a terminal, Progress is a normal tqdm bar. Anywhere else it prints
-one plain line every tenth of the work (or every 15 seconds when the total is unknown).
+one plain log line (logger "progress", see corpus/logs.py) every tenth of the work or every few seconds.
 
     with Progress(total=300, desc="nova download", unit="doc") as bar:
         bar.update(1)
@@ -11,12 +11,15 @@ one plain line every tenth of the work (or every 15 seconds when the total is un
 """
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
 from typing import Any, Iterable, Iterator
 
 from tqdm import tqdm
+
+log = logging.getLogger("progress")
 
 TIME_STEP_SECONDS = 5.0       # without a terminal, a line at least this often so a long step never looks hung
 
@@ -43,8 +46,7 @@ class Progress:
             self.bar = tqdm(iterable, total=total, desc=desc, unit=unit, initial=initial, leave=leave,
                             position=position, **kwargs)
         elif not self.disabled:
-            tqdm.write(f"{desc}: starting" + (f" ({total} {unit})" if total else ""))
-            self._flush()
+            log.info("%s: starting%s", desc, f" ({total} {unit})" if total else "")
             self._stop = threading.Event()
             threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -125,14 +127,6 @@ class Progress:
         hours, rest = divmod(max(int(seconds), 0), 3600)
         return f"{hours}:{rest // 60:02d}:{rest % 60:02d}"
 
-    @staticmethod
-    def _flush() -> None:
-        for stream in (sys.stdout, sys.stderr):
-            try:
-                stream.flush()
-            except Exception:
-                pass
-
     def _line(self, now: float, waiting: bool = False) -> None:
         count = f"{self.n}/{self.total}" if self.total else f"{self.n}"
         share = f" ({self.n / self.total:.0%})" if self.total else ""
@@ -147,8 +141,7 @@ class Progress:
         tail = f" | {self._postfix}" if self._postfix else ""
         if waiting:
             tail += " | still working"
-        tqdm.write(f"{self.desc}: {count} {self.unit}{share}{timing}{tail}")
-        self._flush()
+        log.info("%s: %s %s%s%s%s", self.desc, count, self.unit, share, timing, tail)
         self._printed = True
         self._last_line_n, self._last_line_t = self.n, now
 

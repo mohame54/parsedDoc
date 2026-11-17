@@ -110,7 +110,7 @@ and `chart_trend` (trend, highest value and a labelled value, computed from the 
 with estimated points are skipped). Previously labelled documents keep their v1/v2/v6 annotations and have no figures
 until Stage 2 is run again on them.
 
-Progress shows as a live bar in a terminal. Where there is no terminal (a notebook `!` command, a pipe or a log file), it prints one line every tenth of the work instead, so the progress stays visible.
+Progress shows as a live bar in a terminal. Where there is no terminal (a notebook `!` command, a pipe or a log file), it is written as timestamped log lines on **stderr** instead (every tenth of the work and at least every 5 s, with a `still working` line while one step is slow). Logging is never held back by buffering, so `python -u` and `PYTHONUNBUFFERED` are not needed. Command results (a plan, `status`, the summaries) stay on stdout. Every CLI takes `--log-level {DEBUG,INFO,WARNING,ERROR}` and `--log-file PATH`; for the labeller they go before the command: `labeller --log-file labeller.log run`. Capture both streams with `> run.log 2>&1`.
 
 Downloads show progress: an overall `sources` bar, one bar per download (bytes for archives, documents for Hugging
 Face and `remote_zip` sources, with the MB fetched), and a `catalogue` bar while files are hashed, classified and

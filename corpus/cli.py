@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import shutil
 import sys
@@ -15,6 +16,7 @@ from .datasets import (
     download_zenodo
 )
 from .labels import attach_xfund
+from .logs import add_arguments, configure
 from .progress import Progress
 from .remote_zip import download_remote_zip
 
@@ -33,8 +35,8 @@ from .utils import (
 )
 
 import yaml
-from tqdm import tqdm
 
+log = logging.getLogger("corpus")
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 DOC_EXTS = IMAGE_EXTS | {".pdf"}
@@ -42,15 +44,15 @@ DOC_EXTS = IMAGE_EXTS | {".pdf"}
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)   # lines appear at once in notebooks and pipes
     parser = argparse.ArgumentParser(description="Download, slice and catalogue real-world document datasets.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--source", action="append", help="Source ID; repeat to select multiple. Default: all enabled.")
     parser.add_argument("--dry-run", action="store_true", help="Print enabled source plan without downloading.")
     parser.add_argument("--max-total-gb", type=float, help="Override global storage budget.")
     parser.add_argument("--max-documents", type=int, help="Override per-source document limit.")
+    add_arguments(parser)
     args = parser.parse_args()
+    configure(args)
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     project = cfg["project"]
@@ -89,7 +91,7 @@ def main() -> None:
     for source in source_bar:
         sid = source["id"]
         source_bar.set_postfix(now=sid, refresh=True)
-        tqdm.write(f"\n=== {sid} ===")
+        log.info(f"=== {sid} ===")
         source_raw = raw_root / sid
         source_extracted = extracted_root / sid
         source_pages = page_root / sid
@@ -101,12 +103,12 @@ def main() -> None:
 
         try:
             if kind == "manual":
-                tqdm.write("[manual] " + source.get("instructions", "See source documentation"))
+                log.info("[manual] " + source.get("instructions", "See source documentation"))
                 continue
             if kind == "direct":
                 url = source.get("url", "")
                 if not url:
-                    tqdm.write("[skip] No direct URL configured; see source_url in config.")
+                    log.info("[skip] No direct URL configured; see source_url in config.")
                     continue
                 filename = Path(urlparse(url).path).name or f"{sid}.download"
                 archive = source_raw / filename
@@ -133,7 +135,7 @@ def main() -> None:
                     ann = source_raw / Path(urlparse(source["annotations_url"]).path).name
                     if not ann.exists():
                         download_stream(source["annotations_url"], ann, budget, max_bytes)
-                    tqdm.write(f"[labels] {sid}: {attach_xfund(ann, downloaded, sid)} of {len(downloaded)} "
+                    log.info(f"[labels] {sid}: {attach_xfund(ann, downloaded, sid)} of {len(downloaded)} "
                                "documents have annotation text (they skip Stage 1)")
             else:
                 raise ValueError(f"Unsupported source kind: {kind}")
@@ -154,11 +156,11 @@ def main() -> None:
 
             # Count extracted payloads too: ZIP expansion can be much larger than the archive.
             # This keeps the configured total storage budget meaningful after decompression.
-            tqdm.write(f"[disk] {sid}: measuring storage used so far")
+            log.info(f"[disk] {sid}: measuring storage used so far")
             budget.rescan()
             budget.check()
 
-            tqdm.write(f"[files] {sid}: finding documents")
+            log.info(f"[files] {sid}: finding documents")
             candidates = discover_files(source_extracted, int(project.get("max_files_per_source", 20000)))
             # For word-crop corpora, every image is an individual sample; for PDFs, one PDF is one document.
             doc_limit = args.max_documents or int(source.get("max_documents", project.get("max_documents_per_source", 5000)))
@@ -184,7 +186,7 @@ def main() -> None:
                         "source_id": sid, "original_path": str(path.relative_to(root)),
                         "sha256": digest, "reason": reason,
                     }
-                    tqdm.write(f"[reject] {path.name}: {reason}")
+                    log.info(f"[reject] {path.name}: {reason}")
                     rows_by_id.pop(f"{sid}:{digest[:16]}", None)  # drop any row from an earlier run
                     continue
                 pages = []
@@ -227,10 +229,9 @@ def main() -> None:
                 if accepted >= doc_limit:
                     break
             catalogue.close()
-            tqdm.write(f"[done] {sid}: discovered={len(candidates)} accepted={accepted}")
+            log.info(f"[done] {sid}: discovered={len(candidates)} accepted={accepted}")
         except Exception as exc:
-            tqdm.write(f"[error] {sid}: {exc}")
-
+            log.error(f"[error] {sid}: {exc}")
     source_bar.close()
 
     # Re-apply the blank-form rule to rows from earlier runs (they are skipped as seen duplicates above).
@@ -247,7 +248,7 @@ def main() -> None:
                 "sha256": row["sha256"], "reason": reason,
             }
             rows_by_id.pop(doc_id)
-            print(f"[reject] {Path(row['original_path']).name}: {reason}")
+            log.info(f"[reject] {Path(row['original_path']).name}: {reason}")
 
     rows = list(rows_by_id.values())
     root.mkdir(parents=True, exist_ok=True)

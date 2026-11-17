@@ -8,6 +8,8 @@ The server must support Range requests (HTTP 206); anything else is refused with
 """
 from __future__ import annotations
 
+import logging
+
 import fnmatch
 import io
 import random
@@ -18,6 +20,8 @@ from typing import Any
 
 import requests
 from tqdm import tqdm
+
+log = logging.getLogger("corpus")
 
 from .progress import Progress
 from .utils import Budget
@@ -162,7 +166,7 @@ def select_members(names: list[str], include: list[str], limit: int, seed: int) 
 
 def download_remote_zip(source: dict[str, Any], destination: Path, budget: Budget, max_bytes: int,
                         max_documents: int, seed: int = 42, session: requests.Session | None = None,
-                        out=tqdm.write) -> list[Path]:
+                        out=log.info) -> list[Path]:
     """Fetches a sample of members (and their sidecar files) from a remote ZIP into `destination`.
 
     source keys: url, include (glob patterns for the documents), sidecars (optional templates such as
