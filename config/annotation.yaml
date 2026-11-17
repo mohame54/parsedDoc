@@ -25,6 +25,7 @@ ocr:
   ocr_version: PP-OCRv5
   min_mean_confidence: 0.60     # below this the document is excluded before any Gemini call
   min_chars_per_page: 20        # a page with less text than this is treated as blank
+  max_side: 1600                # photos larger than this (longest side, px) are shrunk before OCR; 0 = never
 
 # Stage 1: vision + OCR draft. Gemini corrects the draft and reports layout flags; it does not retype pages.
 stage1:

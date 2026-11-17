@@ -99,9 +99,12 @@ class Progress:
         if self.bar is not None:
             yield from self.bar          # tqdm counts the items itself
             return
-        for item in self._iterable:
-            yield item
-            self.update(1)
+        try:
+            for item in self._iterable:
+                yield item
+                self.update(1)
+        finally:
+            self.close()
 
     # ---- display --------------------------------------------------------------------------------
     def set_postfix(self, ordered_dict: dict | None = None, refresh: bool = True, **kwargs: Any) -> None:

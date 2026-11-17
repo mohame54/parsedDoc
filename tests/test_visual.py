@@ -316,3 +316,15 @@ def test_fast_opening_matches_pillow_away_from_the_borders_and_is_much_faster():
         assert (fast[r:-r, r:-r] == slow[r:-r, r:-r]).all(), size
         assert fast[90, 100] == 255 and fast[202, 100] == 0     # block kept, thin rule gone
         assert t_fast < t_slow
+
+
+def test_ocr_shrinks_large_images_and_maps_boxes_back(tmp_path):
+    from PIL import Image
+    from labeller.ocr import _shrunk
+
+    image = tmp_path / "big.png"
+    Image.new("RGB", (4000, 2000), "white").save(image)
+    small, scale = _shrunk(image, tmp_path / "scratch", 1600, 1)
+    assert scale == 0.4 and max(Image.open(small).size) == 1600
+    same, factor = _shrunk(image, tmp_path / "scratch", 0, 1)
+    assert same == image and factor == 1.0

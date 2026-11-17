@@ -93,6 +93,21 @@ def ocr_gates(result: dict[str, Any], ocr_cfg: OcrConfig) -> str | None:
     return None
 
 
+def _shrunk(image: Path, scratch: Path, max_side: int, index: int) -> tuple[Path, float]:
+    """A copy whose longest side is at most max_side, and the factor applied. A phone photo of 4000 px takes the
+    CPU models minutes; the text stays readable at 1600 px."""
+    with Image.open(image) as picture:
+        longest = max(picture.size)
+        if not max_side or longest <= max_side:
+            return image, 1.0
+        scale = max_side / longest
+        small = picture.convert("RGB").resize((round(picture.width * scale), round(picture.height * scale)))
+    scratch.mkdir(parents=True, exist_ok=True)
+    target = scratch / f"{image.stem}.ocr{index}.png"
+    small.save(target)
+    return target, scale
+
+
 def run_ocr(store: Store, engine: OcrEngine, doc: dict, ocr_cfg: OcrConfig,
             on_page: Callable[[], None] | None = None) -> str | None:
     """OCR once per document (cached in ocr.json), then apply the local gates. Returns an exclusion reason or None.
@@ -107,9 +122,14 @@ def run_ocr(store: Store, engine: OcrEngine, doc: dict, ocr_cfg: OcrConfig,
         scratch = store.ann_dir(doc_id) / "input"
         for index, rel in enumerate(page_paths(doc), start=1):
             image, _ = prepare_image(store.resolve(rel), scratch)
-            lines = group_lines(engine.recognise(image))
             with Image.open(image) as picture:
                 size = [picture.width, picture.height]
+            image, scale = _shrunk(image, scratch, ocr_cfg.max_side, index)
+            detections = engine.recognise(image)
+            if scale != 1.0:                       # boxes go back to the original image's pixels
+                for det in detections:
+                    det["box"] = [[x / scale, y / scale] for x, y in det["box"]]
+            lines = group_lines(detections)
             pages.append({
                 "page": index,
                 "size": size,

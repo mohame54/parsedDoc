@@ -25,6 +25,7 @@ class OcrConfig:
     ocr_version: str = "PP-OCRv5"
     min_mean_confidence: float = 0.60
     min_chars_per_page: int = 20
+    max_side: int = 1600          # longest image side given to OCR; larger photos are shrunk first (0 = never)
 
 
 VISUAL_MODES = ("never", "auto", "always")
@@ -200,6 +201,7 @@ def load_config(path: str | Path) -> AnnotationConfig:
         ocr_version=str(ocr_raw.get("ocr_version", "PP-OCRv5")),
         min_mean_confidence=float(ocr_raw.get("min_mean_confidence", 0.60)),
         min_chars_per_page=int(ocr_raw.get("min_chars_per_page", 20)),
+        max_side=int(ocr_raw.get("max_side", 1600)),
     )
     language = _language(raw.get("language"))
     visual = _visual(raw.get("visual"))
