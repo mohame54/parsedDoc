@@ -280,5 +280,16 @@ def main() -> None:
     print(f"Disk usage: {bytes_to_gb(budget.used()):.3f} GB / {max_total_gb:.3f} GB")
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Entry point. Exits explicitly after the manifest is written: streamed Hugging Face datasets leave reader
+    threads behind, and Python would otherwise wait for them at exit (the cell or command never returns)."""
+    import os
+
     main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    cli()

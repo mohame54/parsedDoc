@@ -16,8 +16,18 @@ from tqdm import tqdm
 
 FORMAT = "%(asctime)s %(levelname)s %(message)s"
 DATE_FORMAT = "%H:%M:%S"
-QUIET_LIBRARIES = ("rapidocr", "urllib3", "httpx", "httpcore", "filelock", "fsspec")  # INFO lines are noise
+QUIET_LIBRARIES = ("rapidocr", "urllib3", "httpx", "httpcore", "filelock", "fsspec", "huggingface_hub", "datasets")  # INFO lines are noise
 _MARK = "_corpus_logging"
+
+
+class QuietLibraries(logging.Filter):
+    """Drops INFO lines from chatty libraries (every HTTP request of a dataset download). A filter on the handler
+    holds even when a library resets its own logger level."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING or logging.getLogger().level <= logging.DEBUG:
+            return True
+        return not record.name.split(".")[0] in QUIET_LIBRARIES
 
 
 class TqdmHandler(logging.StreamHandler):
@@ -39,11 +49,13 @@ def setup_logging(level: str | int = "INFO", log_file: str | None = None) -> Non
         stream = sys.stderr
         console: logging.Handler = TqdmHandler(stream) if stream.isatty() else logging.StreamHandler(stream)
         console.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
+        console.addFilter(QuietLibraries())
         setattr(console, _MARK, True)
         root.addHandler(console)
     if log_file and not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith(log_file) for h in handlers):
         out = logging.FileHandler(log_file, encoding="utf-8")
         out.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
+        out.addFilter(QuietLibraries())
         setattr(out, _MARK, True)
         root.addHandler(out)
     for name in QUIET_LIBRARIES:                       # `--log-level DEBUG` brings their lines back

@@ -30,7 +30,7 @@ train = [
 ]
 
 [project.scripts]
-corpus-builder = "corpus.cli:main"
+corpus-builder = "corpus.cli:cli"
 labeller = "labeller.cli:main"
 
 [tool.setuptools.packages.find]

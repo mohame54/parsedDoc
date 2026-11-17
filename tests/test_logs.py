@@ -44,3 +44,18 @@ def test_progress_lines_reach_a_pipe_at_once_without_unbuffered_python():
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_chatty_library_lines_are_dropped_unless_debug(tmp_path):
+    root = logging.getLogger()
+    before, level = list(root.handlers), root.level
+    try:
+        setup_logging("INFO", str(tmp_path / "q.log"))
+        logging.getLogger("httpx").setLevel(logging.INFO)         # a library resetting its own level
+        logging.getLogger("httpx").info("HTTP Request: GET https://example")
+        logging.getLogger("labeller").info("kept line")
+        text = (tmp_path / "q.log").read_text()
+        assert "kept line" in text and "HTTP Request" not in text
+    finally:
+        root.handlers[:] = before
+        root.setLevel(level)

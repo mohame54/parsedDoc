@@ -21,7 +21,7 @@ tokens_per_page_estimate: 560
 ocr:
   enabled: true
   engine: rapidocr
-  model_type: server            # PP-OCRv5 server models (larger and slower than mobile)
+  model_type: mobile            # PP-OCRv5 mobile: about 25x faster than server on a CPU (Colab: 12 s vs 298 s per 12 MP photo)
   ocr_version: PP-OCRv5
   min_mean_confidence: 0.60     # below this the document is excluded before any Gemini call
   min_chars_per_page: 20        # a page with less text than this is treated as blank
