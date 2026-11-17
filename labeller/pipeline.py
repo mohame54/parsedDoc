@@ -245,7 +245,8 @@ def ocr_step(cfg: AnnotationConfig, store: Store, engine_factory: Callable[[], A
             outcome["missing_doc"] += 1
             if doc_bar: doc_bar.update(1)
             continue
-        page_bar = inner_bar(len(page_paths(doc)), f"  pages of {doc['document_id'][-16:]}", position=2, unit="page") if progress else None
+        page_bar = (inner_bar(len(page_paths(doc)), f"  pages of {doc['document_id'][-16:]}", position=2, unit="page")
+                    if progress and len(page_paths(doc)) > 1 else None)
         try:
             reason = ocr.run_ocr(store, engine, doc, cfg.ocr, on_page=page_bar.update if page_bar else None)
         except Exception as exc:  # left in needs_ocr, so the next run retries it

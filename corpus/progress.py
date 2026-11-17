@@ -12,12 +12,13 @@ one plain line every tenth of the work (or every 15 seconds when the total is un
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from typing import Any, Iterable, Iterator
 
 from tqdm import tqdm
 
-TIME_STEP_SECONDS = 10.0      # without a terminal, a line at least this often so a long step never looks hung
+TIME_STEP_SECONDS = 5.0       # without a terminal, a line at least this often so a long step never looks hung
 
 
 class Progress:
@@ -37,12 +38,15 @@ class Progress:
         self._start = self._last_line_t = time.monotonic()
         self._printed = False
         self.bar = None
+        self._stop = None
         if sys.stderr.isatty() and not self.disabled:
             self.bar = tqdm(iterable, total=total, desc=desc, unit=unit, initial=initial, leave=leave,
                             position=position, **kwargs)
         elif not self.disabled:
             tqdm.write(f"{desc}: starting" + (f" ({total} {unit})" if total else ""))
             self._flush()
+            self._stop = threading.Event()
+            threading.Thread(target=self._heartbeat, daemon=True).start()
 
     # ---- counting -------------------------------------------------------------------------------
     @property
@@ -65,6 +69,13 @@ class Progress:
             now = time.monotonic()
             if self._due(now):
                 self._line(now)
+
+    def _heartbeat(self) -> None:
+        """Without a terminal, prints a line while one step takes long (a slow OCR page), so the run never looks hung."""
+        while not self._stop.wait(TIME_STEP_SECONDS):
+            now = time.monotonic()
+            if now - self._last_line_t >= TIME_STEP_SECONDS:
+                self._line(now, waiting=True)
 
     def _due(self, now: float) -> bool:
         finished = bool(self.total) and self.n >= self.total and self._last_line_n < self.total
@@ -119,7 +130,7 @@ class Progress:
             except Exception:
                 pass
 
-    def _line(self, now: float) -> None:
+    def _line(self, now: float, waiting: bool = False) -> None:
         count = f"{self.n}/{self.total}" if self.total else f"{self.n}"
         share = f" ({self.n / self.total:.0%})" if self.total else ""
         elapsed = now - self._start
@@ -131,12 +142,16 @@ class Progress:
             if self.total and self.n < self.total:
                 timing += f" | eta {self._clock((self.total - self.n) / rate)}"
         tail = f" | {self._postfix}" if self._postfix else ""
+        if waiting:
+            tail += " | still working"
         tqdm.write(f"{self.desc}: {count} {self.unit}{share}{timing}{tail}")
         self._flush()
         self._printed = True
         self._last_line_n, self._last_line_t = self.n, now
 
     def close(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
         if self.bar is not None:
             self.bar.close()
             return

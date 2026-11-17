@@ -13,8 +13,9 @@ from .base import DatasetProcessor, NativeLabels
 def pdf_text_pages(pdf: Path, min_chars_per_page: int, max_pages: int) -> list[str] | None:
     """Returns per-page text if every page has a usable text layer, else None."""
     try:
-        import fitz
-    except ImportError:
+        from corpus.utils import _pymupdf
+        fitz = _pymupdf()
+    except (ImportError, RuntimeError):
         return None
     try:
         with fitz.open(pdf) as doc:

@@ -112,9 +112,9 @@ def pdf_structure(path: Path, cfg: VisualConfig, max_pages: int) -> dict[str, An
     """Embedded pictures, annotations and checkbox fields in a PDF. Never raises: unreadable means no signal."""
     result: dict[str, Any] = {"image_area": 0.0, "annotations": 0, "checkboxes": 0, "scan_pages": 0}
     try:
-        import fitz
+        from corpus.utils import _pymupdf
 
-        fitz.TOOLS.mupdf_display_errors(False)   # MuPDF prints a warning for every odd form widget
+        fitz = _pymupdf()                        # quiet: MuPDF prints a warning for every odd form widget
         with fitz.open(path) as pdf:
             for number, page in enumerate(pdf):
                 if number >= max_pages:
