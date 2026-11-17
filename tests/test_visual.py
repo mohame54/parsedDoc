@@ -188,7 +188,7 @@ def test_modes_decide_which_documents_get_images():
     assert stage2_uses_images(Cfg, {})
     Cfg.visual = VisualConfig(mode="never")
     Cfg.stage2 = type("S", (), {"prompt_version": "stage2_v1", "send_images": True})
-    assert stage2_uses_images(Cfg, {}) and prompt_version_for(2, Cfg, {}) == "stage2_v6"
+    assert stage2_uses_images(Cfg, {}) and prompt_version_for(2, Cfg, {}) == "stage2_v7"
 
 
 # --- end to end ---------------------------------------------------------------------------------------
@@ -251,7 +251,7 @@ def test_each_document_is_routed_by_its_own_visual_content(two_docs):
     assert plain["key"].endswith("stage2_v5") and "file_data" not in json.dumps(plain)
     assert "tables" not in plain["request"]["generation_config"]["response_schema"]["properties"]
 
-    assert shaded["key"].endswith("stage2_v6") and "file_data" in json.dumps(shaded)
+    assert shaded["key"].endswith("stage2_v7") and "file_data" in json.dumps(shaded)
     assert "tables" in shaded["request"]["generation_config"]["response_schema"]["properties"]
 
     assert store.status("src:plain")["visual"]["multimodal"] is False
@@ -266,7 +266,7 @@ def test_a_stage1_table_flag_upgrades_a_text_only_scan_to_multimodal(two_docs):
     cfg, store, docs = two_docs
     # Stage 1 says the plain scan has a table (its request carries the plain image's path).
     requests = run_to_stage2_requests(cfg, store, docs, make_responder(table_flag_for=("plain",)))
-    assert requests["src:plain"]["key"].endswith("stage2_v6")
+    assert requests["src:plain"]["key"].endswith("stage2_v7")
     assert "stage1:has_table" in store.status("src:plain")["visual"]["reasons"]
 
 

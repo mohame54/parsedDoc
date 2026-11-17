@@ -1,9 +1,7 @@
 project:
   name: real-world-document-corpus
   output_dir: ./data
-  # Hard stop for all downloaded archives + extracted source files + rendered pages.
-  # Rendered files can increase storage substantially.
-  max_total_gb: 3
+  max_total_gb: 2.5            # 9 enabled sources x 0.25 GB = 2.25 GB, headroom for extraction and renders
   # Keep original source files. Recommended: true for reproducibility.
   keep_originals: true
   render_pdf_pages: true
@@ -63,32 +61,39 @@ categories:
     general_form: ["form", "funsd"]
 
 sources:
+  # NOVA: 813 Portuguese invoice/receipt photos. The images zip is 410 MB, so it is read with HTTP Range
+  # requests and only the sampled 300 are fetched (about 150 MB), not the whole archive.
+  # Its annotations are key-value fields (company, date, total, ...) with no transcribed text, so there is
+  # nothing to ground Stage 2 on: NOVA goes through OCR -> Stage 1 -> Stage 2.
   - id: nova_invoices_receipts
     enabled: true
-    kind: zenodo
+    kind: remote_zip
     processor: generic
+    visual_mode: never
     category: invoice
-    description: "813 Portuguese company invoices and receipts with field annotations."
-    record_id: "6371710"
-    max_documents: 100
-    max_download_gb: 0.5
+    language: pt
+    description: "813 Portuguese company invoices and receipts (photos)."
+    url: "https://zenodo.org/api/records/6371710/files/1_Images.zip/content"
+    include: ["1_Images/*.jpg"]
+    max_documents: 300
+    max_download_gb: 0.25
     license: "Check Zenodo rights metadata and original document permissions."
     source_url: "https://zenodo.org/records/6371710"
 
-  # FUNSD: 199 scanned English forms (typewritten, noisy, many with handwriting). The processor is "generic"
-  # on purpose, so the forms go through local OCR -> Stage 1 -> Stage 2 like any scan, instead of using the
-  # dataset's own text labels (processor: funsd). The 30 forms already labelled came from this setup.
-  # The zip is small and already in data/raw/funsd/, so enabling this costs no new download. Raise
-  # max_documents (up to 199) to add more forms; already-collected forms are skipped, not duplicated.
+  # FUNSD: 199 scanned English forms (typewritten, noisy, many with handwriting). The dataset ships its own
+  # text annotations, so the funsd processor uses them: these forms skip OCR and Stage 1 and go straight to
+  # Stage 2. A form whose annotation file is missing or empty falls back to OCR -> Stage 1 -> Stage 2.
+  # (Set processor: generic to send the forms through the vision pipeline instead.)
   - id: funsd
     enabled: true
     kind: direct
-    processor: generic
+    processor: funsd
+    visual_mode: always
     category: general_form
     description: "FUNSD scanned forms benchmark (199 images)."
     url: "https://guillaumejaume.github.io/FUNSD/dataset.zip"
-    max_documents: 190
-    max_download_gb: 0.5
+    max_documents: 300
+    max_download_gb: 0.25
     license: "Check the original FUNSD terms before commercial use."
     source_url: "https://guillaumejaume.github.io/FUNSD/"
 
@@ -99,71 +104,76 @@ sources:
   # coordinates) is saved next to it. The Hugging Face repo cannot be used: it only holds a loader script.
   # Raise max_documents to take more (80,000 pages are available); max_download_gb caps the bytes fetched.
   - id: doclaynet_pdfs
-    enabled: false
+    enabled: true
     kind: remote_zip
     processor: generic
+    visual_mode: auto
     category: other
     description: "DocLayNet single-page PDFs with text layers and layout metadata."
     url: "https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-doclaynet/1.0.0/DocLayNet_extra.zip"
     include: ["PDF/*.pdf"]
     sidecars: ["JSON/{stem}.json"]
-    max_documents: 200
-    max_download_gb: 1.0
+    max_documents: 300
+    max_download_gb: 0.25
     license: "CDLA-Permissive-1.0 for the dataset; verify rights to the underlying pages (corporate reports, manuals, patents)."
     source_url: "https://github.com/DS4SD/DocLayNet"
 
+  # XFUND: the Hugging Face mirror (ianua/XFUND) only holds annotation JSON and no images, so the images
+  # come from the original GitHub release zips, read with HTTP Range requests like the other zip sources.
   - id: xfund_fr
     enabled: true
-    kind: huggingface
-    processor: generic
+    kind: remote_zip
+    processor: sidecar_text       # annotation text -> skips OCR and Stage 1
+    visual_mode: always
     category: general_form
     language: fr
-    description: "XFUND French forms with key-value and layout annotations."
-    dataset_id: "ianua/XFUND"
-    config_name: "French"
-    split: "train"
-    image_column: "image"
-    max_documents: 100
-    max_download_gb: 0.15
-    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
-    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+    description: "XFUND French forms (149 scanned images, train split)."
+    url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/fr.train.zip"
+    annotations_url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/fr.train.json"
+    include: ["*.jpg"]
+    max_documents: 300
+    max_download_gb: 0.25
+    license: "XFUND is released for research (see the upstream repository); verify before commercial use."
+    source_url: "https://github.com/doc-analysis/XFUND"
 
   - id: xfund_de
     enabled: true
-    kind: huggingface
-    processor: generic
+    kind: remote_zip
+    processor: sidecar_text       # annotation text -> skips OCR and Stage 1
+    visual_mode: always
     category: general_form
     language: de
-    description: "XFUND German forms with key-value and layout annotations."
-    dataset_id: "ianua/XFUND"
-    config_name: "German"
-    split: "train"
-    image_column: "image"
-    max_documents: 100
-    max_download_gb: 0.15
-    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
-    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+    description: "XFUND German forms (149 scanned images, train split)."
+    url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/de.train.zip"
+    annotations_url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/de.train.json"
+    include: ["*.jpg"]
+    max_documents: 300
+    max_download_gb: 0.25
+    license: "XFUND is released for research (see the upstream repository); verify before commercial use."
+    source_url: "https://github.com/doc-analysis/XFUND"
 
   - id: xfund_it
     enabled: true
-    kind: huggingface
-    processor: generic
+    kind: remote_zip
+    processor: sidecar_text       # annotation text -> skips OCR and Stage 1
+    visual_mode: always
     category: general_form
     language: it
-    description: "XFUND Italian forms with key-value and layout annotations."
-    dataset_id: "ianua/XFUND"
-    config_name: "Italian"
-    split: "train"
-    image_column: "image"
-    max_documents: 100
-    max_download_gb: 0.15
-    license: "Not clearly specified in the mirror metadata; verify upstream XFUND terms."
-    source_url: "https://huggingface.co/datasets/ianua/XFUND"
+    description: "XFUND Italian forms (149 scanned images, train split)."
+    url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/it.train.zip"
+    annotations_url: "https://github.com/doc-analysis/XFUND/releases/download/v1.0/it.train.json"
+    include: ["*.jpg"]
+    max_documents: 300
+    max_download_gb: 0.25
+    license: "XFUND is released for research (see the upstream repository); verify before commercial use."
+    source_url: "https://github.com/doc-analysis/XFUND"
 
   - id: wildreceipt
     enabled: true
     kind: huggingface
-    processor: generic
+    processor: sidecar_text       # word text + boxes from the dataset -> skips OCR and Stage 1
+    visual_mode: never
+    labels: {format: words_boxes, words_column: words, boxes_column: bboxes}
     category: receipt
     language: en
     description: "WildReceipt retail receipts with text, bounding boxes, and entity labels."
@@ -171,7 +181,7 @@ sources:
     split: "train"
     image_column: "image"
     max_documents: 300
-    max_download_gb: 1.4
+    max_download_gb: 0.25
     license: "Verify the upstream WildReceipt license and redistribution conditions."
     source_url: "https://huggingface.co/datasets/kaydee/wildreceipt"
 
@@ -185,8 +195,8 @@ sources:
     dataset_id: "saurabh1896/OMR-scanned-documents"
     split: "train"
     image_column: "image"
-    max_documents: 36
-    max_download_gb: 0.05
+    max_documents: 300
+    max_download_gb: 0.25
     phi_risk: unknown
     license: "Not clearly specified; verify before use."
     source_url: "https://huggingface.co/datasets/saurabh1896/OMR-scanned-documents"
@@ -195,16 +205,38 @@ sources:
   - id: symage_cms1500
     enabled: true
     kind: huggingface
-    processor: generic
+    processor: sidecar_text       # FUNSD-style entities from the dataset -> skips OCR and Stage 1
+    visual_mode: always
+    labels: {format: funsd_json, column: funsd_json}
     category: insurance_form
     language: en
     description: "50 synthetic CMS-1500 health insurance claim forms with document images and field annotations."
     dataset_id: "Symage/synthetic-us-forms-preview"
     split: "train"
     image_column: "image"
-    form_id_filter: "cms_1500_standard_02_12"
-    max_documents: 50
-    max_download_gb: 0.15
+    form_id_filter: "cms_1500_standard_02_12"   # matched against the `form_id` column (filter_column)
+    max_documents: 300
+    max_download_gb: 0.25
     phi_risk: false
     license: "CC BY 4.0"
     source_url: "https://huggingface.co/datasets/Symage/synthetic-us-forms-preview"
+
+  # ChartQA: real charts (bar, line, pie) with question-answer pairs. The Hugging Face rows repeat each image once
+  # per question, so group_by_image writes one image per chart plus <stem>.qa.json with all its questions.
+  # Licence: GPL-3.0 on the data. Kept UNVERIFIED, so it is exported to export/unverified/ until you review it.
+  - id: chartqa
+    enabled: true
+    kind: huggingface
+    processor: generic
+    visual_mode: always           # chart values and trends are only visible in the image
+    category: other
+    description: "ChartQA real bar, line and pie charts with human and machine question-answer pairs."
+    dataset_id: "HuggingFaceM4/ChartQA"
+    split: "train"
+    image_column: "image"
+    group_by_image: true
+    qa_columns: {question: query, answers: label}
+    max_documents: 300
+    max_download_gb: 0.25
+    license: "GPL-3.0 (ChartQA, Masry et al.); review before training use."
+    source_url: "https://github.com/vis-nlp/ChartQA"

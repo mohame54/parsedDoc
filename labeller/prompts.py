@@ -174,6 +174,24 @@ STAGE2_V4 = _with_descriptions(STAGE2_V1)   # text only
 STAGE2_V5 = _with_descriptions(STAGE2_V2)   # text from OCR
 STAGE2_V6 = _with_descriptions(STAGE2_V3)   # multimodal
 
+FIGURES_SECTION = """F. FIGURES (charts, graphs, diagrams, tables shown as images, photos and formulas)
+- One entry per figure: figure_id (figure_1, ...), figure_type (bar_chart, line_chart, area_chart, scatter_plot,
+  pie_chart, table_image, diagram, flowchart, map, photo, formula or other), page, title and caption exactly as
+  printed ("" if none), summary (one factual sentence on what it shows, no interpretation), x_axis and y_axis as
+  {label, unit} ("" where not shown), series, trend and evidence.
+- For a chart: one series per plotted line, bar group or pie, with its name as printed. Each point has label (the
+  category or x value as printed), value (a number) and estimated. Use estimated false when the value is printed or
+  can be read exactly against labelled gridlines. Otherwise read it off the axis and set estimated true.
+- Never invent a series, and never add a point that is not drawn.
+- trend: for a bar, line, area or scatter chart, the direction of its first series in reading order: increasing,
+  decreasing, stable (within about 5% of the largest value), or mixed. Use not_applicable for pie charts and for
+  every non-chart figure, and use series [] for non-charts.
+- Describe only what is visible. Do not interpret the meaning of the figure."""
+
+STAGE2_V7 = _with_descriptions(STAGE2_V3).replace(
+    "EVIDENCE\n", FIGURES_SECTION + "\n\nEVIDENCE\n", 1)
+assert "F. FIGURES" in STAGE2_V7
+
 PROMPTS: dict[str, str] = {
     "stage1_v1": STAGE1_V1,
     "stage1_v2": STAGE1_V2,
@@ -184,6 +202,7 @@ PROMPTS: dict[str, str] = {
     "stage2_v4": STAGE2_V4,
     "stage2_v5": STAGE2_V5,
     "stage2_v6": STAGE2_V6,
+    "stage2_v7": STAGE2_V7,
 }
 
 # Stage 1 prompts that take the local OCR draft as input.
@@ -191,10 +210,12 @@ OCR_STAGE1_PROMPTS = frozenset({"stage1_v2", "stage1_v3"})
 # Stage 2 prompt used for documents whose text came from OCR (chosen per document, not in config).
 OCR_STAGE2_PROMPT = "stage2_v5"
 # Stage 2 prompt used when the page images are sent too (stage2.send_images: true).
-MULTIMODAL_STAGE2_PROMPT = "stage2_v6"
+MULTIMODAL_STAGE2_PROMPT = "stage2_v7"
 # Older multimodal / described versions still appear on saved outputs and in-flight batches.
-MULTIMODAL_STAGE2_PROMPTS = frozenset({"stage2_v3", "stage2_v6"})
-DESCRIBED_STAGE2_PROMPTS = frozenset({"stage2_v4", "stage2_v5", "stage2_v6"})
+MULTIMODAL_STAGE2_PROMPTS = frozenset({"stage2_v3", "stage2_v6", "stage2_v7"})
+# v7 also asks for figures (charts, diagrams, formulas) with their series and trend.
+FIGURE_STAGE2_PROMPTS = frozenset({"stage2_v7"})
+DESCRIBED_STAGE2_PROMPTS = frozenset({"stage2_v4", "stage2_v5", "stage2_v6", "stage2_v7"})
 
 
 def get_prompt(version: str) -> str:

@@ -124,7 +124,7 @@ def decide(doc: dict, cfg: AnnotationConfig) -> dict:
     if doc.get("phi_risk") and doc["source_id"] not in cfg.phi_allowed_sources:
         return _excluded("phi_gate_unauthorized_source")
     # Free local look at the pages: does Stage 2 need the images, or is the text enough?
-    visual = (visual_analyze(doc, root, cfg.visual, cfg.max_pages) if cfg.visual.mode == "auto" else None)
+    visual = _document_visual(doc, cfg)
     if text_pages:
         language, reason = check_language(cfg, "\n".join(text_pages))
         if reason:
@@ -158,7 +158,8 @@ def make_annotation(doc: dict, document_type: str, fields: list[dict], origin: s
     return annotation
 
 
-def prepare(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], dry_run: bool = False) -> dict[str, Any]:
+def prepare(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], dry_run: bool = False,
+            progress: bool = False) -> dict[str, Any]:
     """Routes every undecided document. Returns counts and the cost drivers for `plan`."""
     counts: Counter[str] = Counter()
     stage1_pages = 0
@@ -166,7 +167,8 @@ def prepare(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], dry_run:
     stage2_chars = 0
     multimodal_docs = 0
     multimodal_pages = 0
-    for doc_id, doc in docs.items():
+    for doc_id, doc in tqdm(docs.items(), desc="routing documents", unit="doc", position=1, leave=False,
+                            disable=not progress):
         if store.status(doc_id) is not None:
             counts["already_decided"] += 1
             continue
@@ -206,16 +208,18 @@ def prepare(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], dry_run:
 
 
 def refresh_visual(cfg: AnnotationConfig, store: Store, docs: dict[str, dict],
-                   apply: bool = False) -> list[dict]:
+                   apply: bool = False, progress: bool = False) -> list[dict]:
     """Visual routing for every tracked document that is not excluded. With apply=True the result is saved
     for documents that have not reached Stage 2 yet (accepted ones keep the routing they were labelled with)."""
     rows = []
-    for doc_id, status in sorted(store.all_statuses().items()):
+    for doc_id, status in tqdm(sorted(store.all_statuses().items()), desc="visual analysis", unit="doc",
+                               leave=False, disable=not progress):
         doc = docs.get(doc_id)
         if doc is None or status["state"] == "excluded":
             continue
-        result = visual_analyze(doc, cfg.data_root, cfg.visual, cfg.max_pages)
-        if status.get("visual") and "stage1:" in ",".join(status["visual"].get("reasons") or []):
+        result = _config_visual(doc) or visual_analyze(doc, cfg.data_root, cfg.visual, cfg.max_pages)
+        if result.get("source") != "config" and status.get("visual") and "stage1:" in ",".join(
+                status["visual"].get("reasons") or []):
             result = add_stage1_flags(result, read_json(store.ann_dir(doc_id) / "stage1.json") or {}, cfg.visual)
         editable = status["state"] in ("needs_ocr", "needs_stage1", "needs_stage2")
         if apply and editable:
@@ -289,16 +293,41 @@ def _draft_text(ocr_result: dict) -> str:
     return "\n".join(lines)
 
 
+def _config_visual(doc: dict) -> dict | None:
+    """The source's own visual setting (visual_mode: always | never on its manifest rows), or None for auto."""
+    mode = doc.get("visual_mode")
+    if mode in ("always", "never"):
+        return {"multimodal": mode == "always", "reasons": [f"source:{mode}"], "signals": {}, "source": "config"}
+    return None
+
+
+def _document_visual(doc: dict, cfg: AnnotationConfig) -> dict | None:
+    """Visual routing for one document: the source's setting when it has one, else the local analysis when
+    visual.mode is auto, else nothing (None)."""
+    configured = _config_visual(doc)
+    if configured is not None:
+        return configured
+    if cfg.visual.mode == "auto":
+        return visual_analyze(doc, cfg.data_root, cfg.visual, cfg.max_pages)
+    return None
+
+
 def stage2_uses_images(cfg: AnnotationConfig, status: dict) -> bool:
     """Does this document's Stage 2 get the page images (multimodal) or only the text?
 
-    stage2.send_images: true or visual.mode: always -> every document. visual.mode: auto -> the documents the
-    visual analysis marked multimodal. Otherwise text only.
+    stage2.send_images: true -> every document. A document whose source sets visual_mode (always or never)
+    follows that. Otherwise visual.mode: always -> every document; auto -> the documents the visual analysis
+    marked multimodal; never -> text only.
     """
-    if cfg.stage2.send_images or cfg.visual.mode == "always":
+    if cfg.stage2.send_images:
+        return True
+    visual = status.get("visual") or {}
+    if visual.get("source") == "config":
+        return bool(visual.get("multimodal"))
+    if cfg.visual.mode == "always":
         return True
     if cfg.visual.mode == "auto":
-        return bool((status.get("visual") or {}).get("multimodal"))
+        return bool(visual.get("multimodal"))
     return False
 
 
@@ -378,7 +407,8 @@ def _build_line(stage: int, cfg: AnnotationConfig, store: Store, api: Any, doc: 
                 uri = api.upload_file(path, mime)
                 parts += [gemini.text_part(f"Page {index} image:"), gemini.file_part(uri, mime)]
                 if on_page: on_page()
-        schema = schemas.stage2_schema(multimodal, version in prompts.DESCRIBED_STAGE2_PROMPTS)
+        schema = schemas.stage2_schema(multimodal, version in prompts.DESCRIBED_STAGE2_PROMPTS,
+                                       version in prompts.FIGURE_STAGE2_PROMPTS)
     return gemini.build_request_line(key, parts, schema, scfg.max_output_tokens)
 
 
@@ -603,7 +633,7 @@ def run_all(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], engine_f
         run.done()
 
     try:
-        step("prepare", lambda: prepare(cfg, store, docs)["counts"])
+        step("prepare", lambda: prepare(cfg, store, docs, progress=progress)["counts"])
         step("OCR", lambda: dict(ocr_step(cfg, store, engine_factory, docs, out=say, progress=progress)))
         step("Stage 1 submit", lambda: submit(cfg, store, api(), 1, docs, limit=limit, out=say, progress=progress))
         step("Stage 1 wait", lambda: dict(watch(cfg, store, api(), 1, docs, interval=interval, out=say, progress=progress)))
@@ -682,10 +712,11 @@ def _process_result(cfg: AnnotationConfig, store: Store, stage: int, doc_id: str
     source_text = "\n".join(source["pages"])
     multimodal = version in prompts.MULTIMODAL_STAGE2_PROMPTS
     described = version in prompts.DESCRIBED_STAGE2_PROMPTS
+    figures = version in prompts.FIGURE_STAGE2_PROMPTS
     if multimodal:
         reasons = validate_stage2_v3(obj, source_text, _line_ids(source), int(st.get("page_count") or 1),
                                      cfg.min_extracted_ratio, cfg.min_fields_for_ratio, cfg.max_value_gap,
-                                     described=described)
+                                     described=described, figures=figures)
     else:
         reasons = validate_stage2(obj, source_text, cfg.min_extracted_ratio, cfg.min_fields_for_ratio,
                                   cfg.max_value_gap, described=described)
@@ -705,6 +736,8 @@ def _process_result(cfg: AnnotationConfig, store: Store, stage: int, doc_id: str
             _clear_evidence(obj)  # no line ids were given, so any evidence would be invented
         attach_boxes(obj, index)
         components = {key: obj[key] for key in ("tables", "visual_elements", "layout", "relationships")}
+        if figures:
+            components["figures"] = obj["figures"]
     annotation = make_annotation(doc, obj["document_type"], obj["fields"], st.get("origin", "gemini_stage1"),
                                  provenance, components, language=st.get("language"),
                                  visual_routing=st.get("visual"))
@@ -715,8 +748,8 @@ def _process_result(cfg: AnnotationConfig, store: Store, stage: int, doc_id: str
 
 
 def _clear_evidence(obj: dict) -> None:
-    for key in ("fields", "tables", "visual_elements", "layout"):
-        for item in obj[key]:
+    for key in ("fields", "tables", "visual_elements", "layout", "figures"):
+        for item in obj.get(key) or []:
             item["evidence"] = []
 
 

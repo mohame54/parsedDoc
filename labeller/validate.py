@@ -1,6 +1,8 @@
 """Deterministic checks. A document is accepted only if every check passes; otherwise it is excluded with reasons."""
 from __future__ import annotations
 
+import math
+
 import difflib
 import re
 
@@ -12,6 +14,8 @@ from .schemas import (
     STAGE2_RESPONSE_SCHEMA,
     STAGE2_V3_RESPONSE_SCHEMA,
     stage2_schema,
+    CHART_TYPES,
+    TREND_CHART_TYPES,
 )
 
 BLOCKING_STATUSES = {"uncertain", "illegible"}
@@ -248,20 +252,66 @@ def validate_stage1_v2(obj: object, ocr_pages: list[dict], page_count: int, max_
     return [], page_texts, metrics, [[line for line in page if line["text"]] for page in pages]
 
 
+TREND_TOLERANCE = 0.05   # a step within 5% of the largest value counts as flat
+
+
+def trend_of(figure: dict) -> str:
+    """The trend of a chart, recomputed from its points. The first series with two or more points is the main one;
+    a step up or down beyond the tolerance sets the direction, and both directions make it mixed."""
+    if figure.get("figure_type") not in TREND_CHART_TYPES:
+        return "not_applicable"
+    for series in figure.get("series") or []:
+        values = [p["value"] for p in series.get("points") or [] if math.isfinite(p["value"])]
+        if len(values) >= 2:
+            break
+    else:
+        return "not_applicable"
+    tolerance = TREND_TOLERANCE * max(max(abs(v) for v in values), 1e-9)
+    steps = [b - a for a, b in zip(values, values[1:])]
+    up = any(step > tolerance for step in steps)
+    down = any(step < -tolerance for step in steps)
+    if up and down:
+        return "mixed"
+    if up:
+        return "increasing"
+    if down:
+        return "decreasing"
+    return "stable"
+
+
+def check_figures(figures: list[dict]) -> list[str]:
+    """Chart figures need data; values must be finite. The trend is recomputed locally and corrected where it
+    disagrees with the points (the figure is marked trend_corrected, so the correction is visible in the data)."""
+    reasons = []
+    for figure in figures:
+        points = [p for series in figure["series"] for p in series["points"]]
+        if figure["figure_type"] in CHART_TYPES and not points:
+            reasons.append(f"chart_without_data:{figure['figure_id']}")
+        if any(not math.isfinite(p["value"]) for p in points):
+            reasons.append(f"bad_value:{figure['figure_id']}")
+        recomputed = trend_of(figure)
+        if figure["trend"] != recomputed:
+            figure["trend"] = recomputed
+            figure["trend_corrected"] = True
+    return reasons
+
+
 def validate_stage2_v3(obj: object, source_text: str, line_ids: set[str] | None, page_count: int,
                        min_extracted_ratio: float = 0.0, min_fields: int = 0, max_value_gap: int = 0,
-                       described: bool = False) -> list[str]:
+                       described: bool = False, figures: bool = False) -> list[str]:
     """Checks a Stage 2 v3 answer. Text must come from the source; ids and references must be consistent.
 
     Visual properties (colors, highlighting, checkbox state) cannot be checked locally; they are kept as
     Gemini reported them. line_ids is the set of transcription line ids Gemini may cite, or None when the
     transcription had no ids (then evidence is ignored rather than checked).
     """
-    errors = _schema_errors(obj, stage2_schema(True, described))
+    errors = _schema_errors(obj, stage2_schema(True, described, figures))
     if errors:
         return errors
     reasons = validate_fields(obj["fields"], source_text, max_value_gap)
     reasons += validate_fill(obj["fields"], min_extracted_ratio, min_fields)
+    if figures:
+        reasons += check_figures(obj["figures"])
 
     known_ids: dict[str, str] = {}   # id -> kind
 
@@ -281,6 +331,8 @@ def validate_stage2_v3(obj: object, source_text: str, line_ids: set[str] | None,
                     reasons.append(f"bad_cell:{row['row_id']}")
                 if cell["text"].strip() and not value_in_source(cell["text"], source_text, max_value_gap):
                     reasons.append(f"table_not_in_source:{table['table_id']}.{row['row_id']}")
+    for figure in obj.get("figures") or []:
+        register(figure["figure_id"], "figure")
     for element in obj["visual_elements"]:
         register(element["element_id"], "element")
     for item in obj["layout"]:
@@ -291,7 +343,9 @@ def validate_stage2_v3(obj: object, source_text: str, line_ids: set[str] | None,
             if relationship[end] not in known_ids:
                 reasons.append(f"unknown_reference:{relationship[end]}")
 
-    components = (obj["fields"], obj["tables"], obj["visual_elements"], obj["layout"])
+    components = [obj["fields"], obj["tables"], obj["visual_elements"], obj["layout"]]
+    if figures:
+        components.append(obj["figures"])
     for component in components:
         for item in component:
             if not 1 <= item["page"] <= max(page_count, 1):

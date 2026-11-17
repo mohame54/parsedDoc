@@ -5,6 +5,7 @@ from .bilingual_rx import BilingualRxProcessor
 from .funsd import FunsdProcessor
 from .generic import GenericProcessor
 from .rxhandbd import RxHandBDProcessor
+from .sidecar import SidecarTextProcessor
 from .sroie import SroieProcessor
 
 # DocILE is routed to the generic vision processor until its real files are inspected.
@@ -13,6 +14,7 @@ PROCESSORS: dict[str, type[DatasetProcessor]] = {
     "sroie": SroieProcessor,
     "rxhandbd": RxHandBDProcessor,
     "bilingual_rx": BilingualRxProcessor,
+    "sidecar_text": SidecarTextProcessor,
     "generic": GenericProcessor,
     "docile": GenericProcessor,
 }

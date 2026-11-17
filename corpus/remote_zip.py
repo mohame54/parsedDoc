@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import requests
+from tqdm import tqdm
 
 from .utils import Budget
 
@@ -160,7 +161,7 @@ def select_members(names: list[str], include: list[str], limit: int, seed: int) 
 
 def download_remote_zip(source: dict[str, Any], destination: Path, budget: Budget, max_bytes: int,
                         max_documents: int, seed: int = 42, session: requests.Session | None = None,
-                        out=print) -> list[Path]:
+                        out=tqdm.write) -> list[Path]:
     """Fetches a sample of members (and their sidecar files) from a remote ZIP into `destination`.
 
     source keys: url, include (glob patterns for the documents), sidecars (optional templates such as
@@ -180,7 +181,9 @@ def download_remote_zip(source: dict[str, Any], destination: Path, budget: Budge
             chosen = select_members(list(infos), include, max_documents, seed)
             out(f"[remote_zip] {len(infos):,} members, {len(chosen):,} selected; "
                 f"listing cost {remote.bytes_fetched / 1e6:.1f} MB of {remote.size / 1e9:.1f} GB")
-            for name in chosen:
+            bar = tqdm(chosen, desc=f"{PurePosixPath(source['url']).name} fetch", unit="doc", leave=False)
+            for name in bar:
+                bar.set_postfix(MB=round(remote.bytes_fetched / 1e6, 1), refresh=False)
                 stem = PurePosixPath(name).stem
                 wanted = [name] + [t.format(stem=stem) for t in sidecars if t.format(stem=stem) in infos]
                 fetch_cost = sum(infos[w].compress_size for w in wanted)

@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from . import distributed as dd
 from .dataset import set_epoch
@@ -69,12 +70,15 @@ def train_sft(
     params = [p for p in model.parameters() if p.requires_grad]
     out_dir = Path(cfg.out_dir)
 
-    logger = MetricLogger(out_dir / "tb", is_main=dd.is_main(), log_every=cfg.log_every,
-                          total_steps=None, tensorboard=cfg.tensorboard)
     global_step, skipped = 0, 0
     start_epoch, start_batch = 0, 0
     if cfg.resume:
         start_epoch, start_batch, global_step = _resume(cfg.resume, model, opt, scheduler)
+
+    steps_per_epoch = math.ceil(len(loader) / cfg.grad_accum)
+    logger = MetricLogger(out_dir / "tb", is_main=dd.is_main(), log_every=cfg.log_every,
+                          total_steps=steps_per_epoch * cfg.epochs, tensorboard=cfg.tensorboard,
+                          initial_step=global_step)
 
     # Running sums over the current logging window; reduced across ranks only on log steps.
     loss_sum = torch.zeros((), device=device)
@@ -194,7 +198,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, amp_dty
     total = torch.zeros((), device=device)
     count = 0
     try:
-        for batch in loader:
+        for batch in tqdm(loader, desc="eval", unit="batch", leave=False, disable=None if dd.is_main() else True):
             batch = _prepare(batch, adapter, device)
             with dd.autocast(device, amp_dtype):
                 total += model(**batch).loss.float()

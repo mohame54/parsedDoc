@@ -14,7 +14,8 @@ import random
 from typing import Callable
 
 from .describe import Describer
-from .render import (EXTRACT_SCHEMA, FORMAT_LABEL, OUTPUT_RULES, SCHEMA_RULES, VISUAL_SCHEMA, VISUAL_TYPES,
+from labeller.validate import trend_of  # noqa: E402
+from .render import (EXTRACT_SCHEMA, FIGURES_SCHEMA, FORMAT_LABEL, OUTPUT_RULES, SCHEMA_RULES, VISUAL_SCHEMA, VISUAL_TYPES,
                      render_schema, serialise, values)
 
 PROMPTS: dict[str, list[str]] = {
@@ -74,6 +75,20 @@ PROMPTS: dict[str, list[str]] = {
 }
 
 PROMPTS.update({
+    "figure": [
+        "List every chart, diagram, figure and formula in this document as a JSON array that conforms to the JSON "
+        "Schema below. Include each series and its points. Return only the JSON array.\n\nJSON Schema:\n{schema}",
+    ],
+    "chart_qa": [
+        "{question}",
+        "Answer from the chart: {question}",
+        "Look at the chart and answer briefly. {question}",
+    ],
+    "chart_trend": [
+        "{question}",
+        "Using only the values shown in the chart, {question}",
+    ],
+
     "propose_schema": [
         "Design a {format} that captures the structured data in this document.",
         "Write the {format} a developer would use to store this kind of document.",
@@ -104,6 +119,7 @@ STRUCTURED_SCHEMA_FORMATS = ["json_schema"]
 STRUCTURED_OUTPUT_FORMATS = ["json"]
 
 _MAX_QA_PER_DOC = 5
+_MAX_CHART_QUESTIONS = 3
 _MAX_SCHEMA_FIELDS = 12
 
 
@@ -161,11 +177,31 @@ def _element_target(element: dict) -> dict:
             "color": element.get("color", ""), "state": element.get("state", "unknown")}
 
 
+def _figure_target(figure: dict) -> dict:
+    """A figure as the training target: values as numbers, evidence ids and boxes dropped (see _table_target)."""
+    def axis(a):
+        return {"label": a.get("label", ""), "unit": a.get("unit", "")}
+    series = [{"name": sr.get("name", ""),
+               "points": [{"label": str(p.get("label", "")), "value": float(p["value"]),
+                           "estimated": bool(p.get("estimated", False))} for p in sr.get("points") or []]}
+              for sr in figure.get("series") or []]
+    return {"figure_id": figure.get("figure_id", ""), "figure_type": figure.get("figure_type", "other"),
+            "page": int(figure.get("page") or 1), "title": figure.get("title", ""), "caption": figure.get("caption", ""),
+            "summary": figure.get("summary", ""), "x_axis": axis(figure.get("x_axis") or {}),
+            "y_axis": axis(figure.get("y_axis") or {}), "series": series,
+            "trend": figure.get("trend", "not_applicable")}
+
+
+def _fmt(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+
+
 def _extract(record: dict, rng: random.Random) -> list[tuple[dict, str, list[int]]]:
     target = {
         "document_type": record["document_type"],
         "fields": _grouped(record["fields"]),
         "tables": [_table_target(t) for t in record.get("tables") or []],
+        "figures": [_figure_target(f) for f in record.get("figures") or []],
         "visual_elements": [_element_target(e) for e in record.get("visual_elements") or []],
         "relationships": [{"from_id": r["from_id"], "to_id": r["to_id"], "type": r["type"]}
                           for r in record.get("relationships") or []],   # always present, empty when none
@@ -269,10 +305,53 @@ def _extract_format(record: dict, rng: random.Random):
     return [(args, answer, list(range(len(record["images"]))))]
 
 
+def _figure(record: dict, rng: random.Random):
+    figures = record.get("figures") or []
+    if not figures:
+        return []
+    args = {"schema": _schema_text(FIGURES_SCHEMA, rng)}
+    answer = json.dumps([_figure_target(f) for f in figures], ensure_ascii=False)
+    return [(args, answer, list(range(len(record["images"]))))]
+
+
+def _chart_qa(record: dict, rng: random.Random):
+    """ChartQA's own question-answer pairs about the image: the answer is the annotated one."""
+    pairs = [q for q in record.get("qa") or [] if q.get("question") and q.get("answers")]
+    rng.shuffle(pairs)
+    return [({"question": q["question"]}, q["answers"][0], list(range(len(record["images"]))))
+            for q in pairs[:_MAX_QA_PER_DOC]]
+
+
+def _chart_trend(record: dict, rng: random.Random):
+    """Questions about the data of charts whose values are all read exactly (no estimated point). The answers are
+    computed from those values, so they are correct by construction."""
+    out = []
+    for figure in record.get("figures") or []:
+        if figure.get("figure_type") not in ("bar_chart", "line_chart", "area_chart", "scatter_plot"):
+            continue
+        main = next((sr for sr in figure.get("series") or [] if len(sr.get("points") or []) >= 2), None)
+        if main is None or any(p.get("estimated") for p in main["points"]):
+            continue
+        points = main["points"]
+        where = f"'{figure['title']}'" if figure.get("title") else "this chart"
+        values = [float(p["value"]) for p in points]
+        top = points[values.index(max(values))]
+        out.append(({"question": f"What is the trend of {main.get('name') or 'the values'} in {where}?"},
+                    trend_of(figure), list(range(len(record["images"])))))
+        out.append(({"question": f"Which category has the highest value in {where}?"},
+                     str(top["label"]), list(range(len(record["images"])))))
+        pick = rng.choice(points)
+        out.append(({"question": f"What is the value for {pick['label']} in {where}?"},
+                     _fmt(float(pick["value"])), list(range(len(record["images"])))))
+    rng.shuffle(out)
+    return out[:_MAX_CHART_QUESTIONS]
+
+
 TASKS: dict[str, Callable] = {
     "ocr": _ocr, "extract": _extract, "classify": _classify, "field_qa": _field_qa,
     "schema": _schema, "key_value": _key_value, "table": _table, "visual": _visual,
     "propose_schema": _propose_schema, "extract_to_schema": _extract_to_schema, "extract_format": _extract_format,
+    "figure": _figure, "chart_qa": _chart_qa, "chart_trend": _chart_trend,
 }
 _NEEDS_DESCRIBER = {"extract_to_schema"}
 

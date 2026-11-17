@@ -71,10 +71,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(str(exc))
 
     if args.cmd == "plan":
-        report = prepare(cfg, store, docs, dry_run=True)
+        report = prepare(cfg, store, docs, dry_run=True, progress=True)
         _print_plan(cfg, report)
     elif args.cmd == "prepare":
-        report = prepare(cfg, store, docs)
+        report = prepare(cfg, store, docs, progress=True)
         print(f"Routed: {report['counts']}")
     elif args.cmd == "status":
         _print_status(store)
@@ -96,11 +96,11 @@ def main(argv: list[str] | None = None) -> None:
         summary = run_all(cfg, store, docs, _engine_factory(cfg), BatchApi, limit=args.limit,
                           interval=args.interval, out=print, progress=True)
         export_summary = export(cfg, store, docs, include_unverified=args.include_unverified,
-                         copy_images=not args.no_copy_images)
+                         copy_images=not args.no_copy_images, progress=True)
         print(f"Run finished. Steps: {summary}")
         print(f"Export: {export_summary}")
     elif args.cmd == "visual":
-        rows = refresh_visual(cfg, store, docs, apply=args.apply)
+        rows = refresh_visual(cfg, store, docs, apply=args.apply, progress=True)
         _print_visual(cfg, rows)
     elif args.cmd == "reevaluate":
         result = reevaluate(cfg, store, docs)
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
         print(describe.collect(BatchApi(), Path(args.out_dir)))
     elif args.cmd == "export":
         summary = export(cfg, store, docs, include_unverified=args.include_unverified,
-                         copy_images=not args.no_copy_images)
+                         copy_images=not args.no_copy_images, progress=True)
         print(summary)
 
 

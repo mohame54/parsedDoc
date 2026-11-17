@@ -31,7 +31,8 @@ def _record():
 def test_every_task_is_derived_and_deterministic():
     a = derive(_record(), random.Random(1))
     assert a == derive(_record(), random.Random(1))
-    assert {e["task"] for e in a} == set(TASKS)
+    figure_tasks = {"figure", "chart_qa", "chart_trend"}      # need figures or chart questions in the record
+    assert {e["task"] for e in a} == set(TASKS) - figure_tasks
     table = next(e for e in a if e["task"] == "table")
     assert table["messages"][-1]["content"].splitlines()[2] == "| x | y |"
     schema = next(e for e in a if e["task"] == "schema")
@@ -199,3 +200,45 @@ def test_a_fields_own_description_wins_over_the_table_and_the_template():
     assert table.field("invoice", field) == "Date the invoice was issued."
     assert table.field("invoice", dict(field, description="")) == "From the table."
     assert "YYYY-MM-DD" in Describer().field("invoice", dict(field, description=""))
+
+
+def _chart_record():
+    rec = _record()
+    rec["figures"] = [{"figure_id": "figure_1", "figure_type": "line_chart", "page": 1, "title": "Sales",
+                       "caption": "", "summary": "Sales per month.", "x_axis": {"label": "month", "unit": ""},
+                       "y_axis": {"label": "sales", "unit": "units"}, "trend": "increasing", "evidence": ["P1-L1"],
+                       "series": [{"name": "units", "points": [
+                           {"label": "Jan", "value": 10, "estimated": False},
+                           {"label": "Feb", "value": 14.5, "estimated": False},
+                           {"label": "Mar", "value": 20, "estimated": False}]}]},
+                      {"figure_id": "figure_2", "figure_type": "bar_chart", "page": 1, "title": "Estimated",
+                       "caption": "", "summary": "", "x_axis": {"label": "", "unit": ""},
+                       "y_axis": {"label": "", "unit": ""}, "trend": "not_applicable", "evidence": [],
+                       "series": [{"name": "s", "points": [{"label": "A", "value": 3, "estimated": True},
+                                                          {"label": "B", "value": 5, "estimated": True}]}]}]
+    rec["qa"] = [{"question": "What is the peak?", "answers": ["Mar"], "annotator": "0"},
+                 {"question": "Empty?", "answers": [], "annotator": "0"}]
+    return rec
+
+
+def test_figure_and_chart_tasks_answers_come_from_the_data_and_validate_against_their_schema():
+    from jsonschema import Draft202012Validator
+
+    from train.render import EXTRACT_SCHEMA
+
+    examples = derive(_chart_record(), random.Random(2), ["figure", "chart_qa", "chart_trend", "extract"])
+    by_task = {}
+    for e in examples:
+        by_task.setdefault(e["task"], []).append(e)
+    figure = json.loads(by_task["figure"][0]["messages"][1]["content"])
+    assert [f["figure_id"] for f in figure] == ["figure_1", "figure_2"] and "evidence" not in figure[0]
+    assert list(Draft202012Validator({"type": "array", "items": __import__("train.render", fromlist=["x"]).FIGURE_SCHEMA}).iter_errors(figure)) == []
+    assert by_task["chart_qa"][0]["messages"][1]["content"] == "Mar"          # the annotated answer, not a guess
+    assert "Empty?" not in json.dumps([e["messages"][0]["content"] for e in by_task["chart_qa"]])
+    answers = {e["messages"][0]["content"][-1]["text"]: e["messages"][1]["content"] for e in by_task["chart_trend"]}
+    assert any(a == "increasing" for a in answers.values()) and "Mar" in " ".join(answers.values())
+    assert all("estimated" not in t for t in answers) and not any("Estimated" in q for q in answers)  # estimated chart skipped
+    extract = json.loads(by_task["extract"][0]["messages"][1]["content"])
+    assert Draft202012Validator(EXTRACT_SCHEMA).iter_errors(extract) is not None
+    assert list(Draft202012Validator(EXTRACT_SCHEMA).iter_errors(extract)) == []
+    assert len(extract["figures"]) == 2

@@ -74,13 +74,45 @@ The global size budget includes files already present under `output_dir`. A sour
 
 ## Sources configured
 
-| Source | Ingestion | Notes |
-|---|---|---|
-| FUNSD | Direct ZIP | Real scanned forms; inspect original terms |
-| RxHandBD | Zenodo API | Real prescription-derived word crops, not full prescription pages |
-| Bilingual prescriptions | Direct URL placeholder | Paste the current Mendeley file URL after checking terms |
-| DocILE | Manual | Access token and official downloader required |
-| SROIE | Hugging Face streaming | Optional `datasets` dependency; confirm upstream terms |
+The total budget (`project.max_total_gb`, now 2.5 GB) is shared by the enabled sources. Each takes at most 300
+documents and 0.25 GB, so the caps total 2.25 GB. Sources with fewer documents stop earlier.
+
+| Source | Ingestion | Stage 1 | Visual (Stage 2 images) | Notes |
+|---|---|---|---|---|
+| NOVA invoices/receipts | `remote_zip` (Zenodo) | needed | never | Portuguese photos. The colour is the photo, not content |
+| FUNSD | Direct ZIP | skipped | always | Own entity text. Checkboxes and handwriting are only visible in the image |
+| DocLayNet reports | `remote_zip` (CDLA-Permissive) | skipped (text layer) | auto | Real reports with Picture, Table and Formula regions |
+| XFUND French / German / Italian | `remote_zip` (GitHub releases) | skipped | always | Text from the release's annotation JSON |
+| WildReceipt | Hugging Face streaming | skipped | never | Word text and boxes. Photos of receipts |
+| Symage CMS-1500 | Hugging Face streaming, filtered on `form_id` | skipped | always | Synthetic claim forms, red printed form with checkboxes |
+| ChartQA | Hugging Face streaming, grouped by image | needed | always | Real charts with question-answer pairs. **GPL-3.0**: kept `UNVERIFIED` |
+| RxHandBD, OMR forms | various, disabled | | | Enable and check terms first |
+
+`visual_mode` on a source sets whether its documents get the page images at Stage 2: `always`, `never`, or `auto`
+(the local analysis decides). It overrides `visual.mode` for that source, so photo false positives never cost images.
+
+**Already-labelled data skips Stage 1.** When a dataset ships its own text, the downloader saves it next to each image
+as `<stem>.labels.json`, and the source uses `processor: sidecar_text` (`funsd` for FUNSD). Those documents skip OCR and
+Stage 1 and go straight to Stage 2. A document with no annotation file, or an empty one, falls back to OCR, Stage 1 and
+Stage 2.
+
+**Grouped questions (ChartQA).** The dataset has one row per question, so `group_by_image: true` saves each distinct
+chart once (de-duplicated by its bytes) and writes `<stem>.qa.json` with every question and answer about it. The cap
+counts charts, not rows.
+
+**Figures (Stage 2 v7).** Multimodal documents are labelled with `stage2_v7`, which adds a `figures` component: each
+chart, diagram, photo or formula with its type, title, caption, one-sentence summary, axes, series of labelled points,
+and trend. Points marked `estimated` were read off the axis rather than printed. The trend is recomputed from the points,
+and a disagreement is corrected and marked `trend_corrected`. Charts with no data are rejected.
+
+**Training tasks for these.** `figure` (the figures as JSON, schema in the prompt), `chart_qa` (ChartQA's own answers)
+and `chart_trend` (trend, highest value and a labelled value, computed from the points that were read exactly; charts
+with estimated points are skipped). Previously labelled documents keep their v1/v2/v6 annotations and have no figures
+until Stage 2 is run again on them.
+
+Downloads show progress: an overall `sources` bar, one bar per download (bytes for archives, documents for Hugging
+Face and `remote_zip` sources, with the MB fetched), and a `catalogue` bar while files are hashed, classified and
+rendered.
 
 DocILE intentionally uses `manual`: its official repository requires a dataset access token and offers smaller subsets. Use the official downloader rather than bypassing access controls. See https://github.com/rossumai/docile.
 

@@ -6,7 +6,7 @@ model's boxes are not pixel-accurate, and the OCR's are.
 """
 from __future__ import annotations
 
-COMPONENTS_WITH_EVIDENCE = ("fields", "tables", "visual_elements", "layout")
+COMPONENTS_WITH_EVIDENCE = ("fields", "tables", "visual_elements", "layout", "figures")
 
 
 def build_line_index(ocr_pages: list[dict]) -> dict[str, dict]:

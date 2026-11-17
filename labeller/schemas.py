@@ -253,3 +253,58 @@ def stage2_schema(multimodal: bool, described: bool) -> dict:
     if multimodal:
         return STAGE2_V3_DESCRIBED_RESPONSE_SCHEMA if described else STAGE2_V3_RESPONSE_SCHEMA
     return STAGE2_DESCRIBED_RESPONSE_SCHEMA if described else STAGE2_RESPONSE_SCHEMA
+
+
+# --- Stage 2 v7: figures (charts, diagrams, photos, formulas) and strikethrough / underline --------------
+# v1-v6 keep their own enums so saved outputs keep validating. v7 only adds to them.
+CHART_TYPES = ["bar_chart", "line_chart", "area_chart", "scatter_plot", "pie_chart"]
+TREND_CHART_TYPES = ["bar_chart", "line_chart", "area_chart", "scatter_plot"]   # a pie's values are shares
+FIGURE_TYPES = CHART_TYPES + ["table_image", "diagram", "flowchart", "map", "photo", "formula", "other"]
+TRENDS = ["increasing", "decreasing", "stable", "mixed", "not_applicable"]
+ELEMENT_TYPES_V7 = ELEMENT_TYPES + ["strikethrough", "underline"]
+
+
+def _figure_schema() -> dict:
+    point = {"type": "object", "properties": {"label": {"type": "string"}, "value": {"type": "number"},
+                                               "estimated": {"type": "boolean"}},
+             "required": ["label", "value", "estimated"]}
+    series = {"type": "object", "properties": {"name": {"type": "string"},
+                                                "points": {"type": "array", "items": point}},
+              "required": ["name", "points"]}
+    axis = {"type": "object", "properties": {"label": {"type": "string"}, "unit": {"type": "string"}},
+            "required": ["label", "unit"]}
+    keys = ["figure_id", "figure_type", "page", "title", "caption", "summary", "x_axis", "y_axis", "series",
+            "trend", "evidence"]
+    return {"type": "object", "properties": {
+        "figure_id": {"type": "string"},
+        "figure_type": {"type": "string", "enum": FIGURE_TYPES},
+        "page": {"type": "integer"},
+        "title": {"type": "string"},
+        "caption": {"type": "string"},
+        "summary": {"type": "string"},
+        "x_axis": axis,
+        "y_axis": axis,
+        "series": {"type": "array", "items": series},
+        "trend": {"type": "string", "enum": TRENDS},
+        "evidence": _EVIDENCE,
+    }, "required": keys}
+
+
+def _build_v7_schema() -> dict:
+    out = _with_description(STAGE2_V3_RESPONSE_SCHEMA)
+    out["properties"]["figures"] = {"type": "array", "items": _figure_schema()}
+    out["required"] = out["required"] + ["figures"]
+    out["properties"]["visual_elements"]["items"]["properties"]["type"] = {"type": "string",
+                                                                          "enum": ELEMENT_TYPES_V7}
+    return out
+
+
+STAGE2_V7_RESPONSE_SCHEMA = _build_v7_schema()
+
+
+def stage2_schema(multimodal: bool, described: bool, figures: bool = False) -> dict:
+    if figures:
+        return STAGE2_V7_RESPONSE_SCHEMA
+    if multimodal:
+        return STAGE2_V3_DESCRIBED_RESPONSE_SCHEMA if described else STAGE2_V3_RESPONSE_SCHEMA
+    return STAGE2_DESCRIBED_RESPONSE_SCHEMA if described else STAGE2_RESPONSE_SCHEMA

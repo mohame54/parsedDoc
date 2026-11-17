@@ -18,7 +18,8 @@ from .base import NoFittingExample
 # structured output schemas across formats; "balanced" keeps every task in play.
 PRESETS: dict[str, dict[str, float]] = {
     "structured": {"extract_to_schema": 3, "propose_schema": 3, "extract": 4, "schema": 1,
-                   "field_qa": 1, "table": 1, "visual": 1, "ocr": 1, "classify": 0.5, "key_value": 0.5},
+                   "field_qa": 1, "table": 1, "visual": 1, "figure": 1, "chart_qa": 1, "chart_trend": 1, "ocr": 1,
+                   "classify": 0.5, "key_value": 0.5},
     "balanced": {name: 1.0 for name in TASKS},
     "ocr": {"ocr": 1.0},
 }

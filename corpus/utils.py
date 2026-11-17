@@ -25,16 +25,22 @@ def bytes_to_gb(n: int) -> float:
     return n / (1024 ** 3)
 
 
-def safe_extract_zip(archive: Path, destination: Path) -> None:
+def safe_extract_zip(archive: Path, destination: Path, progress: bool = True) -> None:
     """Extract without allowing absolute paths or ../ traversal."""
     destination.mkdir(parents=True, exist_ok=True)
     base = destination.resolve()
     with zipfile.ZipFile(archive) as zf:
-        for member in zf.infolist():
+        members = zf.infolist()
+        for member in members:      # validate every name before writing anything
             target = (destination / member.filename).resolve()
             if target != base and base not in target.parents:
                 raise ValueError(f"Unsafe ZIP member path: {member.filename}")
-        zf.extractall(destination)
+        total = sum(m.file_size for m in members)
+        with tqdm(total=total, desc=f"extract {archive.name}", unit="B", unit_scale=True, leave=False,
+                  disable=not progress) as bar:
+            for member in members:
+                zf.extract(member, destination)
+                bar.update(member.file_size)
 
 
 class Budget:

@@ -41,6 +41,7 @@ def v3(**overrides):
         "layout": [{"layout_id": "layout_1", "type": "title", "name": "Patient form", "page": 1,
                     "evidence": ["P1-L1"]}],
         "relationships": [{"from_id": "visual_1", "to_id": "t1_r1", "type": "highlights"}],
+        "figures": [],
     }
     obj.update(overrides)
     return obj
@@ -114,8 +115,8 @@ def test_stage2_is_text_only_unless_images_are_switched_on(tmp_path):
     assert cfg.stage1.send_images is True
     assert prompt_version_for(2, cfg, {"origin": "gemini_stage1"}) == "stage2_v5"
     with_images = dataclasses.replace(cfg, stage2=dataclasses.replace(cfg.stage2, send_images=True))
-    assert prompt_version_for(2, with_images, {"origin": "gemini_stage1"}) == "stage2_v6"
-    assert prompt_version_for(2, with_images, {"origin": "native_text"}) == "stage2_v6"
+    assert prompt_version_for(2, with_images, {"origin": "gemini_stage1"}) == "stage2_v7"
+    assert prompt_version_for(2, with_images, {"origin": "native_text"}) == "stage2_v7"
 
 
 def responder_v3(request):
@@ -138,13 +139,13 @@ def test_pipeline_sends_images_and_stores_components_with_ocr_boxes(project):  #
     submit(cfg, store, api, 2, docs, out=lambda _: None)
 
     stage2_request = api.inputs[sorted(api.inputs)[-1]]
-    assert ":stage2:stage2_v6" in stage2_request
+    assert ":stage2:stage2_v7" in stage2_request
     assert '"file_data"' in stage2_request                      # the page image goes to Stage 2 as well
     assert "P1-L2: Date: 2020-01-02" in stage2_request          # corrected lines carry their ids
 
     assert collect(cfg, store, api, 2, docs, out=lambda _: None)["accepted"] == 1
     annotation = json.loads((store.ann_dir("imgsrc:aaa") / "annotation.json").read_text())
-    assert annotation["provenance"]["stage2"]["prompt_version"] == "stage2_v6"
+    assert annotation["provenance"]["stage2"]["prompt_version"] == "stage2_v7"
     assert [key for key in ("tables", "visual_elements", "layout", "relationships") if annotation[key]] == [
         "tables", "visual_elements", "layout", "relationships"]
     name_box = annotation["fields"][0]["boxes"][0]

@@ -28,19 +28,19 @@ from pathlib import Path
 from .config import AnnotationConfig
 from .pipeline import page_paths
 from .store import Store, read_json, safe_name, write_json
+from tqdm import tqdm
 
 
 def export(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], include_unverified: bool = False,
-           copy_images: bool = True) -> dict:
+           copy_images: bool = True, progress: bool = False) -> dict:
     export_root = store.root / "export"
     statuses = store.all_statuses()
     target = export_root / "unverified" if include_unverified else export_root
     target.mkdir(parents=True, exist_ok=True)
 
     records: list[dict] = []
-    for st in statuses.values():
-        if st["state"] != "accepted":
-            continue
+    accepted = [st for st in statuses.values() if st["state"] == "accepted"]
+    for st in tqdm(accepted, desc="export", unit="doc", leave=False, disable=not progress):
         doc = docs.get(st["doc_id"])
         annotation = read_json(store.ann_dir(st["doc_id"]) / "annotation.json")
         if doc is None or annotation is None:
@@ -76,6 +76,10 @@ def export(cfg: AnnotationConfig, store: Store, docs: dict[str, dict], include_u
     return summary
 
 
+def _qa_path(image: Path) -> Path:
+    return image.with_name(image.stem + ".qa.json")
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -106,7 +110,9 @@ def _record(store: Store, doc_id: str, doc: dict, annotation: dict, copy_images:
             images.append(rel)
     source = read_json(store.ann_dir(doc_id) / "source_text.json") or {}
     pages = list(source.get("pages") or [])
-    components = {key: annotation.get(key) or [] for key in ("tables", "visual_elements", "layout", "relationships")}
+    components = {key: annotation.get(key) or [] for key in ("tables", "visual_elements", "layout", "relationships",
+                                                              "figures")}
+    qa = read_json(_qa_path(store.root / doc["original_path"])) or {}
     canonical = {
         "id": doc_id,
         "source": doc.get("source_id"),
@@ -120,6 +126,7 @@ def _record(store: Store, doc_id: str, doc: dict, annotation: dict, copy_images:
         else annotation.get("language"),
         "fields": annotation.get("fields") or [],
         **components,
+        "qa": qa.get("qa") or [],          # question-answer pairs about the image (ChartQA), read from its sidecar
         "visual_routing": annotation.get("visual_routing"),
         "meta": {
             "category": doc.get("category"),
@@ -165,7 +172,7 @@ def _extract_example(record: dict) -> dict:
         value = f.get("normalized_value")
         grouped.setdefault(f["section"], {})[f["name"]] = value if value not in ("", None) else f.get("raw_value")
     target = {"document_type": c["document_type"], "fields": grouped}
-    for key in ("tables", "visual_elements", "relationships"):
+    for key in ("tables", "visual_elements", "relationships", "figures"):
         if c.get(key):
             target[key] = c[key]
     return {

@@ -170,7 +170,7 @@ FORMAT_LABEL = {"json_schema": "JSON Schema", "pydantic": "Pydantic models", "ty
 
 # Strict JSON Schemas for the whole-document and visual-element targets. They are shown in the prompt
 # (as a vLLM client would send them) and every target is built to validate against them.
-from labeller.schemas import ELEMENT_TYPES, RELATIONSHIP_TYPES, ROW_TYPES  # noqa: E402
+from labeller.schemas import ELEMENT_TYPES, FIGURE_TYPES, RELATIONSHIP_TYPES, ROW_TYPES, TRENDS  # noqa: E402
 
 _STR, _INT, _BOOL = {"type": "string"}, {"type": "integer"}, {"type": "boolean"}
 
@@ -185,6 +185,16 @@ def _enum(values) -> dict:
 
 _ELEMENT_STATES = ["checked", "unchecked", "signed", "present", "unknown"]
 VISUAL_TYPES = ["checkbox", "signature", "stamp", "logo"]
+
+# One figure as it is written in the training target (the evidence ids and boxes are not part of it).
+FIGURE_SCHEMA = _obj({
+    "figure_id": _STR, "figure_type": _enum(FIGURE_TYPES), "page": _INT, "title": _STR, "caption": _STR,
+    "summary": _STR, "x_axis": _obj({"label": _STR, "unit": _STR}), "y_axis": _obj({"label": _STR, "unit": _STR}),
+    "series": {"type": "array", "items": _obj({"name": _STR, "points": {"type": "array", "items": _obj({
+        "label": _STR, "value": {"type": "number"}, "estimated": _BOOL})}})},
+    "trend": _enum(TRENDS),
+})
+FIGURES_SCHEMA = {"type": "array", "items": FIGURE_SCHEMA}
 
 EXTRACT_SCHEMA = _obj({
     "document_type": _STR,
@@ -201,6 +211,7 @@ EXTRACT_SCHEMA = _obj({
     "visual_elements": {"type": "array", "items": _obj({
         "element_id": _STR, "type": _enum(ELEMENT_TYPES), "page": _INT, "description": _STR, "color": _STR,
         "state": _enum(_ELEMENT_STATES)})},
+    "figures": FIGURES_SCHEMA,
     "relationships": {"type": "array", "items": _obj({
         "from_id": _STR, "to_id": _STR, "type": _enum(RELATIONSHIP_TYPES)})},
 })

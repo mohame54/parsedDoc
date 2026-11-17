@@ -10,9 +10,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .datasets import (
+    download_grouped_qa,
     download_huggingface,
     download_zenodo
 )
+from .labels import attach_xfund
 from .remote_zip import download_remote_zip
 
 from .utils import (
@@ -30,6 +32,7 @@ from .utils import (
 )
 
 import yaml
+from tqdm import tqdm
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
@@ -76,25 +79,31 @@ def main() -> None:
                 row = json.loads(line)
                 rows_by_id[row["document_id"]] = row
     seen_hashes: set[str] = {row["sha256"] for row in rows_by_id.values()}
-    for source in sources:
+    for s_ in sources:
+        if s_.get("visual_mode") not in (None, "auto", "always", "never"):
+            raise SystemExit(f"{s_['id']}: visual_mode must be auto, always or never")
+    source_bar = tqdm(sources, desc="sources", unit="source", position=0)
+    for source in source_bar:
         sid = source["id"]
-        print(f"\n=== {sid} ===")
+        source_bar.set_postfix(now=sid, refresh=True)
+        tqdm.write(f"\n=== {sid} ===")
         source_raw = raw_root / sid
         source_extracted = extracted_root / sid
         source_pages = page_root / sid
         source_raw.mkdir(parents=True, exist_ok=True)
         kind = source["kind"]
+        visual_mode = source.get("visual_mode")   # auto (default), always or never: per-document Stage 2 images
         max_gb = float(source.get("max_download_gb", 2))
         max_bytes = int(max_gb * 1024**3)
 
         try:
             if kind == "manual":
-                print("[manual] " + source.get("instructions", "See source documentation"))
+                tqdm.write("[manual] " + source.get("instructions", "See source documentation"))
                 continue
             if kind == "direct":
                 url = source.get("url", "")
                 if not url:
-                    print("[skip] No direct URL configured; see source_url in config.")
+                    tqdm.write("[skip] No direct URL configured; see source_url in config.")
                     continue
                 filename = Path(urlparse(url).path).name or f"{sid}.download"
                 archive = source_raw / filename
@@ -104,8 +113,10 @@ def main() -> None:
             elif kind == "zenodo":
                 downloaded = download_zenodo(str(source["record_id"]), source_raw, budget, max_bytes)
             elif kind == "huggingface":
-                downloaded = download_huggingface(
-                    source, source_extracted, args.max_documents or int(source.get("max_documents", 1000))
+                loader = download_grouped_qa if source.get("group_by_image") else download_huggingface
+                downloaded = loader(
+                    source, source_extracted, args.max_documents or int(source.get("max_documents", 1000)),
+                    budget=budget, max_bytes=max_bytes,
                 )
             elif kind == "remote_zip":
                 # Reads the archive's table of contents with HTTP Range requests and fetches only a sample.
@@ -114,6 +125,13 @@ def main() -> None:
                     args.max_documents or int(source.get("max_documents", 1000)),
                     seed=int(project.get("random_seed", 42)),
                 )
+                if source.get("annotations_url"):
+                    # The zip holds images only; the text labels are a separate (small) JSON asset.
+                    ann = source_raw / Path(urlparse(source["annotations_url"]).path).name
+                    if not ann.exists():
+                        download_stream(source["annotations_url"], ann, budget, max_bytes)
+                    tqdm.write(f"[labels] {sid}: {attach_xfund(ann, downloaded, sid)} of {len(downloaded)} "
+                               "documents have annotation text (they skip Stage 1)")
             else:
                 raise ValueError(f"Unsupported source kind: {kind}")
 
@@ -145,7 +163,8 @@ def main() -> None:
             candidates = candidates[:doc_limit]
 
             accepted = 0
-            for path in candidates:
+            catalogue = tqdm(candidates, desc=f"{sid} catalogue", unit="doc", position=1, leave=False)
+            for path in catalogue:
                 if project.get("max_document_mb", 0) and path.stat().st_size > float(project["max_document_mb"]) * 1024**2:
                     continue
                 digest = sha256_file(path)
@@ -160,7 +179,7 @@ def main() -> None:
                         "source_id": sid, "original_path": str(path.relative_to(root)),
                         "sha256": digest, "reason": reason,
                     }
-                    print(f"[reject] {path.name}: {reason}")
+                    tqdm.write(f"[reject] {path.name}: {reason}")
                     rows_by_id.pop(f"{sid}:{digest[:16]}", None)  # drop any row from an earlier run
                     continue
                 pages = []
@@ -180,6 +199,7 @@ def main() -> None:
                     "document_id": f"{sid}:{digest[:16]}",
                     "source_id": sid,
                     "processor": source.get("processor", "generic"),
+                    "visual_mode": visual_mode,
                     "phi_risk": bool(source.get("phi_risk", False)),
                     "source_url": source.get("source_url"),
                     "source_description": source.get("description"),
@@ -198,11 +218,15 @@ def main() -> None:
                     "real_world_status": "source_claim_not_independently_verified"
                 }
                 accepted += 1
+                catalogue.set_postfix(accepted=accepted, refresh=False)
                 if accepted >= doc_limit:
                     break
-            print(f"[done] discovered={len(candidates)} accepted={accepted}")
+            catalogue.close()
+            tqdm.write(f"[done] {sid}: discovered={len(candidates)} accepted={accepted}")
         except Exception as exc:
-            print(f"[error] {sid}: {exc}", file=sys.stderr)
+            tqdm.write(f"[error] {sid}: {exc}")
+
+    source_bar.close()
 
     # Re-apply the blank-form rule to rows from earlier runs (they are skipped as seen duplicates above).
     for doc_id, row in list(rows_by_id.items()):
