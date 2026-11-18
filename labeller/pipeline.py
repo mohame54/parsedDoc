@@ -10,7 +10,9 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -383,7 +385,7 @@ def _build_line(stage: int, cfg: AnnotationConfig, store: Store, api: Any, doc: 
         if scfg.send_images:
             scratch = store.ann_dir(doc_id) / "input"
             for index, rel in enumerate(page_paths(doc), start=1):
-                path, mime = gemini.prepare_image(store.resolve(rel), scratch)
+                path, mime = gemini.prepare_image(store.resolve(rel), scratch, cfg.upload_max_side)
                 uri = api.upload_file(path, mime)
                 parts += [gemini.text_part(f"Page {index} image:"), gemini.file_part(uri, mime)]
                 if on_page: on_page()
@@ -392,7 +394,7 @@ def _build_line(stage: int, cfg: AnnotationConfig, store: Store, api: Any, doc: 
         parts = [gemini.text_part(prompt)]
         scratch = store.ann_dir(doc_id) / "input"
         for index, rel in enumerate(page_paths(doc), start=1):
-            path, mime = gemini.prepare_image(store.resolve(rel), scratch)
+            path, mime = gemini.prepare_image(store.resolve(rel), scratch, cfg.upload_max_side)
             uri = api.upload_file(path, mime)
             parts += [gemini.text_part(f"Page {index}:"), gemini.file_part(uri, mime)]
             if on_page: on_page()
@@ -406,7 +408,7 @@ def _build_line(stage: int, cfg: AnnotationConfig, store: Store, api: Any, doc: 
         if multimodal:
             scratch = store.ann_dir(doc_id) / "input"
             for index, rel in enumerate(page_paths(doc), start=1):
-                path, mime = gemini.prepare_image(store.resolve(rel), scratch)
+                path, mime = gemini.prepare_image(store.resolve(rel), scratch, cfg.upload_max_side)
                 uri = api.upload_file(path, mime)
                 parts += [gemini.text_part(f"Page {index} image:"), gemini.file_part(uri, mime)]
                 if on_page: on_page()
@@ -448,19 +450,38 @@ def submit(cfg: AnnotationConfig, store: Store, api: Any, stage: int, docs: dict
                          if stage == 1 and s["doc_id"] in docs) if progress else 0
         doc_bar = inner_bar(len(chunk), f"Stage {stage} prepare {bdir.name}", position=1) if progress else None
         page_bar = inner_bar(page_total, "  uploading pages", position=2, unit="page") if progress and stage == 1 else None
-        for status in chunk:
+        lock = threading.Lock()
+
+        def tick(bar) -> Callable[[], None] | None:
+            if bar is None:
+                return None
+
+            def update() -> None:
+                with lock:
+                    bar.update(1)
+            return update
+
+        def build(status: dict):
             doc = docs.get(status["doc_id"])
             if doc is None:
-                _say(out, progress, f"[skip] {status['doc_id']}: not in manifest")
-                if doc_bar: doc_bar.update(1)
-                continue
+                return status, None, "not in manifest"
             try:
-                lines.append(_build_line(stage, cfg, store, api, doc, version,
-                                         on_page=page_bar.update if page_bar else None))
-                built.append(doc["document_id"])
+                return status, doc, _build_line(stage, cfg, store, api, doc, version, on_page=tick(page_bar))
             except Exception as exc:  # one bad document must not stop the chunk
-                _say(out, progress, f"[skip] {doc['document_id']}: {exc}")
-            if doc_bar: doc_bar.update(1)
+                return status, doc, exc
+
+        # Documents upload their page images at the same time (the wait on the network dominates), and the
+        # results are taken back in the original order so the batch file does not depend on timing.
+        workers = max(1, min(cfg.upload_workers, len(chunk)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="upload") as pool:
+            for status, doc, result in pool.map(build, chunk):
+                if isinstance(result, dict):
+                    lines.append(result)
+                    built.append(doc["document_id"])
+                else:
+                    name = doc["document_id"] if doc else status["doc_id"]
+                    _say(out, progress, f"[skip] {name}: {result}")
+                if doc_bar: doc_bar.update(1)
         if page_bar: page_bar.close()
         if doc_bar: doc_bar.close()
         if not lines:

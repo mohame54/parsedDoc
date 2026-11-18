@@ -94,6 +94,8 @@ class AnnotationConfig:
     train_ratio: float
     val_ratio: float
     seed: int
+    upload_workers: int = 8         # page images uploaded to Gemini at the same time
+    upload_max_side: int = 2000     # longest side of an uploaded image in px; larger ones are shrunk (0 = send as is)
 
     @property
     def manifest_path(self) -> Path:
@@ -219,6 +221,8 @@ def load_config(path: str | Path) -> AnnotationConfig:
         max_pages=int(raw["max_pages"]),
         min_text_chars_per_page=int(raw["min_text_chars_per_page"]),
         batch_size=int(raw["batch_size"]),
+        upload_workers=max(1, int(raw.get("upload_workers", 8))),
+        upload_max_side=int(raw.get("upload_max_side", 2000)),
         max_attempts=int(raw["max_attempts"]),
         tokens_per_page_estimate=int(raw.get("tokens_per_page_estimate", 560)),
         stage1=stage1,

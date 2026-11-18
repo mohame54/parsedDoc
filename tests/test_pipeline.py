@@ -310,3 +310,36 @@ def test_request_key_round_trips_through_result_parsing():
     key = request_key("funsd:0123456789abcdef", 2, "stage2_v1")
     assert key == "funsd:0123456789abcdef:stage2:stage2_v1"
     assert key.rsplit(":", 2)[0] == "funsd:0123456789abcdef"
+
+
+def test_one_failing_upload_skips_that_document_only(project):
+    from dataclasses import replace
+
+    cfg, store, docs = project
+    prepare(cfg, store, docs)
+    cfg = replace(cfg, upload_workers=3)
+    messages: list[str] = []
+
+    class FlakyApi(FakeApi):
+        def upload_file(self, path, mime_type):
+            if path.name == "doc_img.png":
+                raise RuntimeError("network down")
+            return super().upload_file(path, mime_type)
+
+    count = submit(cfg, store, FlakyApi(responder), 1, docs, out=messages.append)
+    assert any("doc_img" in m or "imgsrc" in m for m in messages) and "network down" in " ".join(messages)
+    assert count >= 0
+
+
+def test_prepare_image_shrinks_only_when_asked_and_only_large_images(tmp_path):
+    big = tmp_path / "big.jpg"
+    Image.new("RGB", (4000, 3000), "white").save(big)
+    small = tmp_path / "small.png"
+    Image.new("RGB", (100, 100), "white").save(small)
+
+    same, mime = gemini.prepare_image(big, tmp_path / "s")
+    assert same == big and mime == "image/jpeg"                  # no limit: the original is sent
+    shrunk, mime = gemini.prepare_image(big, tmp_path / "s", 2000)
+    assert shrunk != big and max(Image.open(shrunk).size) == 2000 and mime == "image/jpeg"
+    untouched, _ = gemini.prepare_image(small, tmp_path / "s", 2000)
+    assert untouched == small

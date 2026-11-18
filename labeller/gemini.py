@@ -23,19 +23,31 @@ MIME_BY_SUFFIX = {
 }
 
 
-def prepare_image(path: Path, scratch: Path) -> tuple[Path, str]:
-    """Returns a path Gemini accepts plus its MIME type. Other formats (tif, bmp) are converted to PNG copies."""
-    suffix = path.suffix.lower()
-    if suffix in MIME_BY_SUFFIX:
-        return path, MIME_BY_SUFFIX[suffix]
+def prepare_image(path: Path, scratch: Path, max_side: int = 0) -> tuple[Path, str]:
+    """Returns a path Gemini accepts plus its MIME type. Other formats (tif, bmp) are converted to PNG copies, and
+    with max_side an image whose longest side is larger is shrunk to a copy (smaller upload, same readable text)."""
     from PIL import Image
 
+    suffix = path.suffix.lower()
+    mime = MIME_BY_SUFFIX.get(suffix)
+    if mime == "application/pdf":
+        return path, mime
+    if mime and not max_side:
+        return path, mime
     scratch.mkdir(parents=True, exist_ok=True)
-    out = scratch / f"{path.stem}.png"
-    if not out.exists():
-        with Image.open(path) as image:
-            image.convert("RGB").save(out)
-    return out, "image/png"
+    with Image.open(path) as image:
+        longest = max(image.size)
+        if mime and longest <= max_side:
+            return path, mime
+        jpeg = suffix in (".jpg", ".jpeg")
+        out = scratch / (f"{path.stem}.up.jpg" if jpeg else f"{path.stem}.png")
+        if not out.exists():
+            picture = image.convert("RGB")
+            if max_side and longest > max_side:
+                scale = max_side / longest
+                picture = picture.resize((round(image.width * scale), round(image.height * scale)))
+            picture.save(out, quality=90) if jpeg else picture.save(out)
+    return out, "image/jpeg" if out.suffix == ".jpg" else "image/png"
 
 
 def text_part(text: str) -> dict[str, Any]:
