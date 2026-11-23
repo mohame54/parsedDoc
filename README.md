@@ -480,6 +480,7 @@ takes a path or a name in `config/`.
 |---|---|
 | `config/train.yaml` | the default: LoRA, bf16, bucketed batches, every setting listed and commented |
 | `config/train_probe.yaml` | the memory probe: 8 steps, one max-length sample per batch, logging every step |
+| `config/train_lora_check.yaml` | the first LoRA test: 16 documents, many passes, the loss must fall clearly |
 | `config/train_qlora.yaml` | 4-bit base weights with AdamW |
 | `config/train_full.yaml` | no LoRA, sharded with FSDP2 (`torchrun --nproc_per_node 4 -m train.train --config train_full`) |
 

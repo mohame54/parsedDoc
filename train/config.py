@@ -11,7 +11,8 @@ The file groups settings in sections; every key is the matching flag without its
     extends: train.yaml        # optional: start from another file in the same folder, then override
     model:       id, ocr_mode, train_vision, quant
     lora:        enabled, r, alpha, dropout, target_modules
-    data:        root, preset, descriptions, max_length, merge_pages, workers, samples_per_document
+    data:        root, preset, descriptions, max_length, merge_pages, workers, samples_per_document,
+                 max_documents
     batching:    batch_size, batch_tokens, max_batch_size, pad_multiple, pad_to_max, loss_weighting
     optimizer:   name, lr, muon_lr, muon_adjust, weight_decay, max_grad_norm, scheduler, warmup_ratio, min_lr_ratio
     training:    strategy, epochs, grad_accum, precision, compile, max_steps
@@ -37,7 +38,7 @@ SECTIONS: dict[str, dict[str, str]] = {
              "target_modules": "lora_targets"},
     "data": {"root": "root", "preset": "preset", "descriptions": "descriptions", "max_length": "max_length",
              "merge_pages": "merge_pages", "workers": "workers",
-             "samples_per_document": "samples_per_document"},
+             "samples_per_document": "samples_per_document", "max_documents": "max_documents"},
     "batching": {"batch_size": "batch_size", "batch_tokens": "batch_tokens", "max_batch_size": "max_batch_size",
                  "pad_multiple": "pad_multiple", "pad_to_max": "pad_to_max", "loss_weighting": "loss_weighting"},
     "optimizer": {"name": "optimizer", "lr": "lr", "muon_lr": "muon_lr", "muon_adjust": "muon_adjust",

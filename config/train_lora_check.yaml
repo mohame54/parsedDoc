@@ -1,0 +1,32 @@
+# First LoRA test: can the adapters learn at all? 16 documents, 1 example each, a higher learning rate, no
+# schedule, many passes. The loss should fall clearly (it should at least halve) and never turn nan; if it does
+# not, something is wrong with the data path or the optimizer, not with how long you trained.
+#   uv run --extra train python -m train.train --config train_lora_check
+extends: train.yaml
+
+data:
+  max_documents: 16
+  samples_per_document: 1
+
+batching:
+  batch_tokens: 3200
+  max_batch_size: 4
+
+optimizer:
+  lr: 3.0e-4
+  scheduler: constant
+  warmup_ratio: 0.1
+
+training:
+  epochs: 12
+  grad_accum: 2
+  max_steps: 0
+
+checkpoints:
+  out_dir: checkpoints/lora_check
+  save_every: 0
+  log_every: 2
+  tensorboard: false
+
+hub:
+  repo: null

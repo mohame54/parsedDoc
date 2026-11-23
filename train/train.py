@@ -82,6 +82,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="learning-rate curve after the warmup")
     p.add_argument("--warmup-ratio", type=float, default=0.05, help="share of the steps spent warming up linearly")
     p.add_argument("--min-lr-ratio", type=float, default=0.1, help="the curve ends at this fraction of the base lr")
+    p.add_argument("--max-documents", type=int, default=None,
+                   help="use only the first N documents of the split (a quick overfit test)")
     p.add_argument("--samples-per-document", type=int, default=1,
                    help="examples drawn from each document per epoch (a different task / format each time)")
     p.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto")
@@ -172,7 +174,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             args.root, split="train", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
             transform=transform, batch_size=args.batch_size, num_workers=args.workers,
             batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
-            samples_per_document=args.samples_per_document,
+            samples_per_document=args.samples_per_document, max_documents=args.max_documents,
         )
         if args.batch_tokens:
             log.info("length-bucketed batches: up to %d padded tokens and %d samples per micro-batch, "
@@ -192,6 +194,10 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
                      args.lora_dropout)
             kwargs = {} if args.lora_targets is None else {"target_modules": _targets(args.lora_targets)}
             model.add_lora(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout, **kwargs)
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        log.info("trainable parameters: %s of %s (%.2f%%)%s", f"{trainable:,}", f"{total:,}", 100 * trainable / total,
+                 " - LoRA adapters only" if args.lora else "")
         log.info("starting training: strategy %s, %d epoch(s)", args.strategy, args.epochs)
 
         def make_optimizer(named_params):

@@ -38,6 +38,7 @@ data:
   merge_pages: null            # vertical | horizontal | grid; null = the model's default
   workers: 2
   samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
+  max_documents: null          # use only the first N documents (null = all); handy for an overfit test
 
 batching:
   batch_tokens: 3200           # padded tokens per micro-batch (bucketed); set it from the memory probe, null = fixed batch_size
