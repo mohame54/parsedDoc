@@ -39,6 +39,7 @@ data:
   workers: 2
   samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
   max_documents: null          # use only the first N documents (null = all); handy for an overfit test
+  val_max_documents: 64        # validate on the first N documents of val.jsonl (null = all); each pass costs time
 
 batching:
   batch_tokens: 3200           # padded tokens per micro-batch (bucketed); set it from the memory probe, null = fixed batch_size
@@ -66,6 +67,8 @@ training:
   precision: auto              # auto (bf16 if supported, else fp16) | bf16 | fp16 | fp32
   compile: false               # varying batch shapes make it recompile; leave off with bucketing
   max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
+  eval: true                   # validation loss (val/loss in TensorBoard): before training, every eval_every steps, each epoch
+  eval_every: 200              # steps between validations (0 = only at the end of each epoch)
   chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
 
 checkpoints:

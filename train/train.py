@@ -64,6 +64,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--chunked-loss", action=argparse.BooleanOptionalAction, default=True,
                    help="compute the loss over the supervised positions only, in chunks, without the full logits "
                         "(a lot less memory on long batches; the same loss)")
+    p.add_argument("--eval", action=argparse.BooleanOptionalAction, default=True,
+                   help="validate on val.jsonl: before training, every --eval-every steps and at the end of each "
+                        "epoch (the val/loss curve in TensorBoard)")
+    p.add_argument("--eval-every", type=int, default=0,
+                   help="also validate every N optimizer steps (0 = only at the end of each epoch)")
+    p.add_argument("--val-max-documents", type=int, default=None,
+                   help="validate on the first N documents of val.jsonl only (default: all)")
     p.add_argument("--max-steps", type=int, default=0, help="stop after this many optimizer steps (memory probes)")
     p.add_argument("--hub-repo", default=None, help="push checkpoints to this Hugging Face repo (user/name)")
     p.add_argument("--hub-token", default=None, help="Hugging Face token (default: HF_TOKEN or the cached login)")
@@ -196,6 +203,18 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
                      "samples longer than %s tokens are left out", args.batch_tokens, args.max_batch_size,
                      transform.max_length)
 
+        val_loader = None
+        if args.eval and (Path(args.root) / "val.jsonl").exists():
+            val_loader = make_loader(
+                args.root, split="val", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
+                transform=transform, batch_size=args.batch_size, num_workers=args.workers,
+                batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
+                max_documents=args.val_max_documents,
+            )
+            log.info("validation: %d batches from %s/val.jsonl, loss logged as val/loss", len(val_loader), args.root)
+        elif args.eval:
+            log.warning("no val.jsonl in %s: training without a validation loss", args.root)
+
         log.info("loading the model %s (the first run downloads its weights)", args.model_id)
         load_dtype = weights_dtype(args, dtype)
         log.info("weights are loaded as %s (compute dtype %s)", str(load_dtype).removeprefix("torch."),
@@ -243,7 +262,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             precision=args.precision, log_every=args.log_every, save_every_steps=args.save_every,
             out_dir=args.out_dir, resume=resolve_resume(args.resume, args.hub_token), tensorboard=args.tensorboard,
             compile=args.compile, loss_weighting=loss_weighting, max_steps=args.max_steps, hub=hub,
-            batch_adapter=batch_adapter_for(args.model_id),
+            batch_adapter=batch_adapter_for(args.model_id), val_loader=val_loader, eval_every=args.eval_every,
         )
         runner = {"single": train_single, "ddp": train_ddp, "fsdp2": train_fsdp2}[args.strategy]
         result = runner(model, loader, make_optimizer, make_scheduler, cfg)

@@ -54,6 +54,8 @@ class MetricLogger:
         if not self.enabled:
             return
         now = time.perf_counter()
+        if self.total and step > self.total:      # batch counts vary per epoch, so the total is only an estimate
+            self.total = step
         extra: dict[str, float] = {}
         if tokens is not None and now > self._last:
             extra["tokens_per_s"] = tokens / (now - self._last)

@@ -1,0 +1,23 @@
+# A big GPU (an A100 or H100 with 40-80 GB, for example on Modal): bf16 and far larger micro-batches.
+#   uv run --extra train python -m train.train --config train_large_gpu
+# batch_tokens is per GPU and the memory it needs was measured only on a 15 GB T4 with the chunked loss:
+# about 6.4 GB for the fp16 weights plus about 1.8 GB per 1,000 tokens. That puts roughly 15,000 tokens on a 40 GB card
+# and 33,000 on an 80 GB one; 16,000 is a safe start. Probe it before a long run:
+#   --config train_probe --precision bf16 --batch-tokens 24000 --max-batch-size 24 --samples-per-document 1
+extends: train.yaml
+
+batching:
+  batch_tokens: 16000          # about 14 samples per micro-batch at the measured 1,090 tokens per sample
+  max_batch_size: 24
+
+training:
+  precision: bf16              # A100 / H100 do bf16 natively: no loss scaler, no overflow skips
+  eval_every: 100
+  grad_accum: 1                # one micro-batch is already about as many samples as 3 T4 micro-batches x 2 GPUs
+
+data:
+  workers: 4
+  val_max_documents: null      # validate on everything: it is fast on this hardware
+
+checkpoints:
+  out_dir: checkpoints/large_gpu

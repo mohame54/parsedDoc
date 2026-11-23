@@ -243,7 +243,8 @@ class LengthBucketBatchSampler:
     def _build(self, epoch: int) -> tuple[list[list[int]], dict]:
         n = len(self.dataset)
         lengths = [self._padded(self.dataset.length_of(epoch, i, self.token_length))
-                   for i in Progress(range(n), desc=f"planning epoch {epoch} batches", unit="example", leave=False)]
+                   for i in Progress(range(n), desc=f"planning epoch {epoch} batches", unit="example", leave=False,
+                                  disable=self.rank != 0)]
         too_long = [i for i, length in enumerate(lengths) if length > self.batch_tokens]
         if too_long:
             raise ValueError(f"{len(too_long)} example(s) are longer than batch_tokens={self.batch_tokens} "

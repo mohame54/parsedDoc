@@ -147,3 +147,10 @@ def test_peft_keeps_adapters_in_fp32_on_a_half_precision_base():
     model = peft.get_peft_model(base, peft.LoraConfig(r=2, target_modules=["0"]))
     dtypes = {p.dtype for n, p in model.named_parameters() if "lora_" in n}
     assert dtypes == {torch.float32}                              # the fp16 loss scaler needs fp32 trainable params
+
+
+def test_the_large_gpu_config_loads_and_keeps_both_training_settings():
+    flat = load_config("train_large_gpu")
+    assert flat["precision"] == "bf16" and flat["batch_tokens"] == 16000 and flat["eval_every"] == 100
+    assert flat["grad_accum"] == 1 and flat["val_max_documents"] is None and flat["workers"] == 4
+    assert load_config("train")["eval"] is True and load_config("train_probe")["eval"] is False

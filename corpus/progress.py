@@ -105,8 +105,12 @@ class Progress:
     def update(self, n: int = 1) -> None:
         if self.bar is not None:
             self.bar.update(n)         # tqdm counts it; adding to self.n as well would count every step twice
+            if self.total and self.bar.n > self.total:      # the total was an estimate: grow it instead of showing 102%
+                self.total = self.bar.total = self.bar.n
             return
         self._n += n
+        if self.total and self._n > self.total:
+            self.total = self._n
         if self.disabled:
             return
         now = time.monotonic()

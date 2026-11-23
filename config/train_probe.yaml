@@ -13,6 +13,7 @@ optimizer:
   warmup_ratio: 0
 
 training:
+  eval: false                   # a memory / overfit test needs no validation pass
   grad_accum: 1
   max_steps: 8
 

@@ -94,3 +94,18 @@ def test_a_plain_tqdm_bar_counts_each_update_once():
         bar.close()
     finally:
         set_mode("auto")
+
+
+def test_a_progress_total_that_was_an_estimate_grows_instead_of_passing_100_percent(caplog):
+    import logging as _logging
+    from corpus.progress import Progress, set_mode
+
+    caplog.set_level(_logging.INFO)
+    set_mode("lines")
+    bar = Progress(total=4, desc="est", unit="step")
+    for _ in range(6):
+        bar.update(1)
+    bar.close()
+    assert bar.total == 6
+    assert not any("(1" in r.getMessage() and "%" in r.getMessage() and "(150%" in r.getMessage() for r in caplog.records)
+    assert "6/6 step (100%)" in caplog.records[-1].getMessage()

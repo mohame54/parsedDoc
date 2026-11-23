@@ -482,6 +482,7 @@ takes a path or a name in `config/`.
 | `config/train_probe.yaml` | the memory probe: 8 steps, one max-length sample per batch, logging every step |
 | `config/train_lora_check.yaml` | the first LoRA test: 16 documents, many passes, the loss must fall clearly |
 | `config/train_qlora.yaml` | 4-bit base weights with AdamW |
+| `config/train_large_gpu.yaml` | a 40-80 GB GPU (A100 / H100): bf16, 16,000 tokens per micro-batch |
 | `config/train_full.yaml` | no LoRA, sharded with FSDP2 (`torchrun --nproc_per_node 4 -m train.train --config train_full`) |
 
 Sections are `model`, `lora` (`r`, `alpha`, `dropout`, `target_modules`), `data`, `batching`, `optimizer` (with the
@@ -523,6 +524,23 @@ uv run --extra train python -m train.train --config train_probe --batch-tokens 6
 
 `3200` tokens is one maximum-length sample, so `peak_mem_gb` there is the memory of one sample plus the model.
 If it fits, double `--batch-tokens` until it does not, then keep the largest value that fits.
+
+### Validation loss and TensorBoard
+
+With `val.jsonl` next to `train.jsonl`, training validates on it (`--eval`, on by default): before the first step
+(the starting point), every `--eval-every` steps, and at the end of each epoch. The loss is per target token, with
+dropout off, over a fixed draw of `--val-max-documents` documents (one task per document, the same every time), so
+the numbers compare across steps and runs. It is logged as `validation loss … at step N` and written to TensorBoard
+as `val/loss` next to `train/loss`.
+
+```python
+%load_ext tensorboard
+%tensorboard --logdir checkpoints/lora_run/tb
+```
+
+On a remote machine (for example Modal), write the run to a persistent volume with `--out-dir`, then copy the `tb`
+folder down and run `tensorboard --logdir <folder>` locally, or open a tunnel to port 6006 from the job.
+`config/train_large_gpu.yaml` is the starting point for a 40-80 GB card (bf16, 16,000 tokens per micro-batch).
 
 ### Two GPUs (DDP), for example Kaggle's 2 x T4
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -50,6 +51,7 @@ class SFTConfig:
     compile: bool = False                      # torch.compile the language model before wrapping
     batch_adapter: Callable[[dict], dict] | None = None   # maps collator keys to the model's forward kwargs
     val_loader: DataLoader | None = None
+    eval_every: int = 0                        # validate every N optimizer steps (0 = at the end of each epoch only)
     loss_weighting: str = "batch"              # batch: mean of the micro-batch losses | token: every target token equal
     max_steps: int = 0                         # stop after this many optimizer steps (0 = run all epochs); for memory probes
     hub: Any = None                            # train.hub.HubPusher on rank 0 (checkpoints go to a Hugging Face repo)
@@ -102,6 +104,8 @@ def train_sft(
     model.train()
     stop = False
     try:
+        if cfg.val_loader is not None and global_step == 0:
+            _validate(model, cfg, device, amp_dtype, logger, 0)      # the starting point to compare against
         for epoch in range(start_epoch, cfg.epochs):
             if stop:
                 break
@@ -184,6 +188,8 @@ def train_sft(
                     token_sum.zero_()
                     window_samples = window_padded = window_batches = 0
 
+                if cfg.val_loader is not None and cfg.eval_every and global_step % cfg.eval_every == 0:
+                    _validate(model, cfg, device, amp_dtype, logger, global_step)
                 done = bool(cfg.max_steps) and global_step >= cfg.max_steps
                 if (cfg.save_every_steps and global_step % cfg.save_every_steps == 0) and not done:
                     next_epoch, next_batch = (epoch + 1, 0) if last else (epoch, consumed)
@@ -193,10 +199,11 @@ def train_sft(
                     stop = True
                     break
 
-            if cfg.val_loader is not None and not stop:
-                val = evaluate(model, cfg.val_loader, device, amp_dtype, cfg.batch_adapter)
-                logger.scalars(global_step, {"val/loss": val})
+            if cfg.val_loader is not None and not stop and not (cfg.eval_every and global_step % cfg.eval_every == 0):
+                _validate(model, cfg, device, amp_dtype, logger, global_step)
 
+        if cfg.val_loader is not None and stop:
+            _validate(model, cfg, device, amp_dtype, logger, global_step)     # a run cut short by max_steps
         _save(model, opt, scheduler, global_step, out_dir,
               extra={"epoch": cfg.epochs, "next_batch": 0}, tag="final", hub=cfg.hub, final=True)
     finally:
@@ -239,6 +246,8 @@ def _window_weights(window: list[dict], mode: str, device: torch.device) -> _Wei
 def _log_plan(loader: DataLoader, epoch: int) -> None:
     """One line about the epoch's batches (length-bucketed loaders) and the examples left out for being too long."""
     summary = getattr(loader.batch_sampler, "summary", None)
+    if not dd.is_main():                      # every rank has the same plan; one line is enough
+        return
     if summary is not None:
         info = summary()
         log.info("epoch %d: %d batches, mean batch size %.1f, padding waste %.0f%%, longest %d tokens",
@@ -284,20 +293,33 @@ def _clip(params: Iterable[nn.Parameter], max_norm: float | None) -> torch.Tenso
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, amp_dtype: torch.dtype,
              adapter: Callable[[dict], dict] | None = None) -> float:
-    """Mean loss over a loader (all ranks). Restores the previous train/eval mode afterwards."""
+    """Loss per target token over a loader, summed over every rank. Restores the train/eval mode afterwards.
+    Dropout is off in eval mode, so the number is comparable between steps and between runs."""
     was_training = model.training
     model.eval()
     total = torch.zeros((), device=device)
-    count = 0
+    tokens = torch.zeros((), device=device)
     try:
-        for batch in Progress(loader, desc="eval", unit="batch", leave=False, disable=not dd.is_main()):
+        for batch in Progress(loader, desc="validation", unit="batch", leave=False, disable=not dd.is_main()):
             batch = _prepare(batch, adapter, device)
+            n = (batch["labels"][..., 1:] != -100).sum().float() if "labels" in batch else torch.ones((), device=device)
             with dd.autocast(device, amp_dtype):
-                total += model(**batch).loss.float()
-            count += 1
+                loss = model(**batch).loss.float()
+            total += loss * n
+            tokens += n
     finally:
         model.train(was_training)
-    return float(dd.all_reduce_mean(total / max(count, 1)))
+    sums = dd.all_reduce_sum(torch.stack([total, tokens]))
+    return float(sums[0] / sums[1].clamp(min=1))
+
+
+def _validate(model, cfg: "SFTConfig", device, amp_dtype, logger, step: int) -> float:
+    started = time.perf_counter()
+    value = evaluate(model, cfg.val_loader, device, amp_dtype, cfg.batch_adapter)
+    logger.scalars(step, {"val/loss": value})                 # TensorBoard: the val/loss curve
+    log.info("validation loss %.4f at step %d (%d batches, %.0f s)", value, step, len(cfg.val_loader),
+             time.perf_counter() - started)
+    return value
 
 
 def _save(model: nn.Module, opt, scheduler, step: int, out_dir: Path, extra: dict[str, Any],

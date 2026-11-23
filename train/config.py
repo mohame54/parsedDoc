@@ -12,10 +12,10 @@ The file groups settings in sections; every key is the matching flag without its
     model:       id, ocr_mode, train_vision, quant
     lora:        enabled, r, alpha, dropout, target_modules
     data:        root, preset, descriptions, max_length, merge_pages, workers, samples_per_document,
-                 max_documents
+                 max_documents, val_max_documents
     batching:    batch_size, batch_tokens, max_batch_size, pad_multiple, pad_to_max, loss_weighting
     optimizer:   name, lr, muon_lr, muon_adjust, weight_decay, max_grad_norm, scheduler, warmup_ratio, min_lr_ratio
-    training:    strategy, epochs, grad_accum, precision, compile, max_steps, chunked_loss
+    training:    strategy, epochs, grad_accum, precision, compile, max_steps, chunked_loss, eval, eval_every
     checkpoints: out_dir, save_every, log_every, tensorboard, resume
     hub:         repo, private, every_save           (the token is never read from a file: use HF_TOKEN)
 
@@ -38,14 +38,16 @@ SECTIONS: dict[str, dict[str, str]] = {
              "target_modules": "lora_targets"},
     "data": {"root": "root", "preset": "preset", "descriptions": "descriptions", "max_length": "max_length",
              "merge_pages": "merge_pages", "workers": "workers",
-             "samples_per_document": "samples_per_document", "max_documents": "max_documents"},
+             "samples_per_document": "samples_per_document", "max_documents": "max_documents",
+             "val_max_documents": "val_max_documents"},
     "batching": {"batch_size": "batch_size", "batch_tokens": "batch_tokens", "max_batch_size": "max_batch_size",
                  "pad_multiple": "pad_multiple", "pad_to_max": "pad_to_max", "loss_weighting": "loss_weighting"},
     "optimizer": {"name": "optimizer", "lr": "lr", "muon_lr": "muon_lr", "muon_adjust": "muon_adjust",
                   "weight_decay": "weight_decay", "max_grad_norm": "max_grad_norm", "scheduler": "scheduler",
                   "warmup_ratio": "warmup_ratio", "min_lr_ratio": "min_lr_ratio"},
     "training": {"strategy": "strategy", "epochs": "epochs", "grad_accum": "grad_accum", "precision": "precision",
-                 "compile": "compile", "max_steps": "max_steps", "chunked_loss": "chunked_loss"},
+                 "compile": "compile", "max_steps": "max_steps", "chunked_loss": "chunked_loss",
+                 "eval": "eval", "eval_every": "eval_every"},
     "checkpoints": {"out_dir": "out_dir", "save_every": "save_every", "log_every": "log_every",
                     "tensorboard": "tensorboard", "resume": "resume"},
     "hub": {"repo": "hub_repo", "private": "hub_private", "every_save": "hub_every_save"},

@@ -290,3 +290,39 @@ def test_max_steps_stops_early_and_still_writes_the_final_checkpoint(tmp_path):
     result = train_sft(3, model, torch.optim.SGD(model.parameters(), lr=0.01), loader, None, 0, cfg=cfg)
     assert result["step"] == 3
     assert list((tmp_path / "o").glob("final_0000003.pt"))
+
+
+def test_validation_loss_is_logged_before_training_every_n_steps_and_each_epoch(tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    root = _docs(tmp_path)
+    loader = _loader(root, batch_tokens=400, max_batch_size=4)
+    val_loader = make_loader(root, "val", DatasetProcessor(preset="structured"), transform=_transform(),
+                             batch_tokens=400, max_batch_size=4)
+    model = StubModel()
+    cfg = SFTConfig(epochs=2, grad_accum=2, precision="fp32", log_every=100, save_every_steps=0, tensorboard=False,
+                    out_dir=str(tmp_path / "o"), val_loader=val_loader, eval_every=3,
+                    batch_adapter=lambda b: {k: b[k] for k in ("input_ids", "attention_mask", "labels")})
+    result = train_sft(2, model, torch.optim.SGD(model.parameters(), lr=0.01), loader, None, 0, cfg=cfg)
+    steps = [int(m.group(1)) for r in caplog.records if (m := __import__("re").search(r"validation loss [\d.]+ at step (\d+)", r.getMessage()))]
+    assert steps[0] == 0                                          # the starting point
+    assert len(steps) == len(set(steps)) and steps == sorted(steps)         # never twice for one step
+    every_third = set(range(3, result["step"] + 1, 3))
+    assert every_third <= set(steps)                              # every N steps ...
+    assert result["step"] in steps                                # ... and the end of the last epoch
+
+
+def test_validation_loss_weights_every_target_token_equally():
+    from train.sft import evaluate
+
+    class Fixed(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+        def forward(self, labels, **_):                             # batch loss = 1.0 for 1 token, 3.0 for 3 tokens
+            return type("O", (), {"loss": self.w.sum() + (1.0 if labels.shape[0] == 1 else 3.0)})()
+
+    batches = [{"labels": torch.tensor([[0, 5]])}, {"labels": torch.tensor([[0, 5], [0, 5], [0, 5]])}]
+    value = evaluate(Fixed(), batches, torch.device("cpu"), torch.float32)
+    assert value == pytest.approx((1.0 * 1 + 3.0 * 3) / 4)          # not the plain mean of the two batch losses (2.0)
