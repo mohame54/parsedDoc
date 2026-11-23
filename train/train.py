@@ -61,6 +61,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--loss-weighting", choices=["token", "batch"], default=None,
                    help="token: every target token counts equally over the accumulation window; batch: mean of the "
                         "micro-batch losses. Default: token with --batch-tokens, else batch")
+    p.add_argument("--chunked-loss", action=argparse.BooleanOptionalAction, default=True,
+                   help="compute the loss over the supervised positions only, in chunks, without the full logits "
+                        "(a lot less memory on long batches; the same loss)")
     p.add_argument("--max-steps", type=int, default=0, help="stop after this many optimizer steps (memory probes)")
     p.add_argument("--hub-repo", default=None, help="push checkpoints to this Hugging Face repo (user/name)")
     p.add_argument("--hub-token", default=None, help="Hugging Face token (default: HF_TOKEN or the cached login)")
@@ -204,6 +207,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             args.model_id, lang_trained=True, vision_trained=args.train_vision,
             dtype=load_dtype, quantization=args.quant, **extra,
         )
+        model.chunked_loss = args.chunked_loss
         if args.lora:
             log.info("adding LoRA adapters (r=%d, alpha=%d, dropout=%g)", args.lora_r, args.lora_alpha,
                      args.lora_dropout)

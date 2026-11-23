@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForImageTextToText
 from typing_extensions import Self
 
+LOSS_CHUNK = 512          # supervised positions whose logits exist at the same time in the chunked loss
+
 LORA_TARGETS = r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
+
+
+def _cross_entropy_sum(lm_head: nn.Module, states: torch.Tensor, wanted: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.cross_entropy(lm_head(states).float(), wanted, reduction="sum")
 
 
 class DeepSeekOCR(nn.Module):
@@ -44,6 +52,7 @@ class DeepSeekOCR(nn.Module):
         self.vision_trained = vision_trained
         self.quantization = quantization
         self.lora_enabled = False
+        self.chunked_loss = True
         self.apply_training()
 
     # ---- module resolution -------------------------------------------------------------
@@ -187,7 +196,34 @@ class DeepSeekOCR(nn.Module):
     # ---- forward / compile -------------------------------------------------------------
 
     def forward(self, *args: Any, **kwargs: Any):
+        if self.chunked_loss and not args and kwargs.get("labels") is not None:
+            return self._chunked_forward(dict(kwargs))
         return self.model(*args, **kwargs)
+
+    def _chunked_forward(self, kwargs: dict[str, Any]):
+        """The same loss as the HF forward, without the full logits.
+
+        The HF model builds logits of shape (batch, length, vocabulary) for every position and then upcasts them to
+        fp32 for the loss. With a 129,280-token vocabulary that is about 2 MB per token and most of what a long batch
+        costs. The loss only needs the supervised positions (the answer, a fraction of the length), so this runs the
+        network up to the last hidden state, keeps the positions that have a label, and applies the output layer
+        and the cross-entropy to them `LOSS_CHUNK` at a time under activation checkpointing: a chunk's logits are
+        dropped after use and recomputed during backward. The value and the gradients equal the HF loss (the
+        shift, the -100 ignore index and the mean over supervised tokens are the same).
+        """
+        labels = kwargs.pop("labels")
+        kwargs.pop("logits_to_keep", None)
+        kwargs.setdefault("use_cache", False)
+        hf = self.base
+        hidden = hf.model(**kwargs)[0][:, :-1]                  # position t predicts token t + 1
+        target = labels[:, 1:].to(hidden.device)
+        keep = target != -100
+        states, wanted = hidden[keep], target[keep]
+        total = hidden.new_zeros((), dtype=torch.float32)
+        for start in range(0, states.shape[0], LOSS_CHUNK):
+            total = total + checkpoint(_cross_entropy_sum, hf.lm_head, states[start:start + LOSS_CHUNK],
+                                       wanted[start:start + LOSS_CHUNK], use_reentrant=False)
+        return SimpleNamespace(loss=total / keep.sum().clamp(min=1), logits=None)
 
     def compile(self, **compile_kwargs: Any) -> None:
         """Compile only the language model and lm_head (not the whole wrapper).

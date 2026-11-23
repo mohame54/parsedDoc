@@ -524,6 +524,24 @@ uv run --extra train python -m train.train --config train_probe --batch-tokens 6
 `3200` tokens is one maximum-length sample, so `peak_mem_gb` there is the memory of one sample plus the model.
 If it fits, double `--batch-tokens` until it does not, then keep the largest value that fits.
 
+### Two GPUs (DDP), for example Kaggle's 2 x T4
+
+```bash
+%%bash
+cd /kaggle/working/parsedDoc
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+uv run --extra train torchrun --nproc_per_node 2 -m train.train --config config/train.yaml \
+    --strategy ddp --precision fp16 --batch-tokens 3200 --grad-accum 4 --progress lines
+```
+
+- `--strategy ddp` puts a full copy of the model on each GPU, so **it doubles the throughput and does not lower the
+  memory per GPU**: the `--batch-tokens` that fits one card is the same for two. `--batch-tokens`, `--max-batch-size`
+  and `--grad-accum` are per GPU, so a step sees twice as many samples as on one card.
+- Both processes must find the weights already downloaded: run once on a single GPU first, or the two downloads race.
+- If the first step hangs, set `NCCL_P2P_DISABLE=1` (some T4 hosts without peer-to-peer links hang on it).
+- Every rank runs the same number of steps (the batch plan drops the uneven tail), only rank 0 writes logs,
+  checkpoints and Hub pushes, and the token-weighted loss is normalised over both ranks.
+
 ### Pushing checkpoints to the Hugging Face Hub
 
 ```bash

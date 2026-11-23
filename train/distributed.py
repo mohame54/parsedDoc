@@ -20,7 +20,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # ---- process group ---------------------------------------------------------------------------
 
 def init_distributed() -> torch.device:
-    """Initialise the process group when launched by torchrun; returns this rank's device."""
+    """Initialise the process group when launched by torchrun; returns this rank's device.
+    Calling it again returns the same device, following the backend that is already running."""
+    if dist.is_available() and dist.is_initialized():
+        return torch.device("cuda", torch.cuda.current_device()) if dist.get_backend() == "nccl" else torch.device("cpu")
     if int(os.environ.get("WORLD_SIZE", "1")) > 1 and not dist.is_initialized():
         if torch.cuda.is_available():
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))

@@ -66,6 +66,7 @@ training:
   precision: auto              # auto (bf16 if supported, else fp16) | bf16 | fp16 | fp32
   compile: false               # varying batch shapes make it recompile; leave off with bucketing
   max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
+  chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
 
 checkpoints:
   out_dir: checkpoints/sft
