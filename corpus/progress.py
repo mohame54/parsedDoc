@@ -103,10 +103,10 @@ class Progress:
                 or bool(self._step) and self.n - self._last_line_n >= self._step)
 
     def update(self, n: int = 1) -> None:
-        self.n = self.n + n
         if self.bar is not None:
-            self.bar.update(n)
+            self.bar.update(n)         # tqdm counts it; adding to self.n as well would count every step twice
             return
+        self._n += n
         if self.disabled:
             return
         now = time.monotonic()

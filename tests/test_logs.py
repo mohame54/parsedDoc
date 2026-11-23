@@ -80,3 +80,17 @@ def test_progress_modes_choose_between_log_lines_and_plain_bars(caplog):
             set_mode("sometimes")
     finally:
         set_mode("auto")
+
+
+def test_a_plain_tqdm_bar_counts_each_update_once():
+    from corpus.progress import Progress, set_mode
+
+    try:
+        set_mode("bars")
+        bar = Progress(total=8, desc="sft", unit="step")
+        for _ in range(8):
+            bar.update(1)
+        assert bar.n == 8 and bar.bar.n == 8                  # it used to read 16
+        bar.close()
+    finally:
+        set_mode("auto")
