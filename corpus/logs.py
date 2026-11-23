@@ -16,7 +16,8 @@ from tqdm import tqdm
 
 FORMAT = "%(asctime)s %(levelname)s %(message)s"
 DATE_FORMAT = "%H:%M:%S"
-QUIET_LIBRARIES = ("rapidocr", "urllib3", "httpx", "httpcore", "filelock", "fsspec", "huggingface_hub", "datasets")  # INFO lines are noise
+QUIET_LIBRARIES = ("rapidocr", "urllib3", "httpx", "httpcore", "filelock", "fsspec", "huggingface_hub", "datasets",
+                   "hf_xet")  # INFO lines are noise
 _MARK = "_corpus_logging"
 
 
@@ -27,7 +28,7 @@ class QuietLibraries(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING or logging.getLogger().level <= logging.DEBUG:
             return True
-        return not record.name.split(".")[0] in QUIET_LIBRARIES
+        return not record.name.split(".")[0].startswith(QUIET_LIBRARIES)      # also httpx2, httpcore.*, ...
 
 
 class TqdmHandler(logging.StreamHandler):
@@ -66,7 +67,13 @@ def add_arguments(parser) -> None:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Log level for progress and events (stderr).")
     parser.add_argument("--log-file", help="Also write the log lines to this file.")
+    parser.add_argument("--progress", default=None, choices=["auto", "bars", "lines"],
+                        help="auto: live bars on a terminal, log lines elsewhere; bars: tqdm bars even in a "
+                             "notebook cell or pipe; lines: always log lines (env PROGRESS_MODE sets the default)")
 
 
 def configure(args) -> None:
     setup_logging(getattr(args, "log_level", "INFO"), getattr(args, "log_file", None))
+    if getattr(args, "progress", None):
+        from .progress import set_mode
+        set_mode(args.progress)

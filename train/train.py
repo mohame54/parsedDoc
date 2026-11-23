@@ -139,6 +139,18 @@ def save_resolved(args: argparse.Namespace) -> None:
     (out / "resolved_config.yaml").write_text(yaml.safe_dump(resolved, sort_keys=False), encoding="utf-8")
 
 
+def weights_dtype(args: argparse.Namespace, compute_dtype: torch.dtype) -> torch.dtype:
+    """The dtype the pretrained weights are loaded in.
+
+    fp32 master weights are needed only where the base weights themselves train (full fine-tuning, or
+    --train-vision). With LoRA or QLoRA the base is frozen, so it loads in the compute dtype: for this 3.4B-parameter
+    model that is 6.8 GB instead of 13.6 GB, the difference between fitting a 16 GB card and not. PEFT keeps the
+    adapter weights themselves in fp32, so the optimizer and the fp16 loss scaler still see fp32 parameters."""
+    if args.quant is not None or (args.lora and not args.train_vision):
+        return compute_dtype
+    return torch.float32
+
+
 def build_transform(args: argparse.Namespace):
     """The same transform settings `python -m train.stats` measures with, so its numbers apply here."""
     model_id = args.model_id
@@ -182,9 +194,12 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
                      transform.max_length)
 
         log.info("loading the model %s (the first run downloads its weights)", args.model_id)
-        # Master weights stay fp32 (mixed precision casts them); quantized weights use the compute dtype.
-        load_dtype = dtype if args.quant is not None else torch.float32
-        extra = {"device_map": {"": str(device)}} if args.quant is not None else {}
+        load_dtype = weights_dtype(args, dtype)
+        log.info("weights are loaded as %s (compute dtype %s)", str(load_dtype).removeprefix("torch."),
+                 str(dtype).removeprefix("torch."))
+        # single and ddp load every tensor straight onto this process's GPU (no staging copy in CPU RAM); fsdp2 loads on
+        # the CPU and shards afterwards
+        extra = {"device_map": {"": str(device)}} if args.quant is not None or args.strategy != "fsdp2" else {}
         model = DeepSeekOCR.from_pretrained(
             args.model_id, lang_trained=True, vision_trained=args.train_vision,
             dtype=load_dtype, quantization=args.quant, **extra,

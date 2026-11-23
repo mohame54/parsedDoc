@@ -126,3 +126,24 @@ def test_the_scheduler_warms_up_decays_and_moves_every_param_group():
         flat_opt.step()
         flat.step()
     assert flat.get_last_lr() == [0.02, 1e-3]                          # constant without warmup never moves
+
+
+def test_a_frozen_base_loads_in_the_compute_dtype_and_a_trained_one_in_fp32():
+    import torch
+    from train.train import weights_dtype
+
+    half = torch.float16
+    assert weights_dtype(parse_args([*BASE, "--lora"]), half) == half                   # LoRA: frozen base
+    assert weights_dtype(parse_args([*BASE, "--lora", "--quant", "4bit"]), half) == half
+    assert weights_dtype(parse_args([*BASE, "--no-lora"]), half) == torch.float32       # full fine-tuning
+    assert weights_dtype(parse_args([*BASE, "--lora", "--train-vision"]), half) == torch.float32
+
+
+def test_peft_keeps_adapters_in_fp32_on_a_half_precision_base():
+    peft = pytest.importorskip("peft")
+    import torch
+
+    base = torch.nn.Sequential(torch.nn.Linear(8, 8)).half()
+    model = peft.get_peft_model(base, peft.LoraConfig(r=2, target_modules=["0"]))
+    dtypes = {p.dtype for n, p in model.named_parameters() if "lora_" in n}
+    assert dtypes == {torch.float32}                              # the fp16 loss scaler needs fp32 trainable params

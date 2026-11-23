@@ -1,4 +1,5 @@
 import logging
+import pytest
 import subprocess
 import sys
 import textwrap
@@ -53,9 +54,29 @@ def test_chatty_library_lines_are_dropped_unless_debug(tmp_path):
         setup_logging("INFO", str(tmp_path / "q.log"))
         logging.getLogger("httpx").setLevel(logging.INFO)         # a library resetting its own level
         logging.getLogger("httpx").info("HTTP Request: GET https://example")
+        logging.getLogger("httpx2").info("HTTP Request: GET https://hub")       # huggingface_hub's own name
         logging.getLogger("labeller").info("kept line")
         text = (tmp_path / "q.log").read_text()
         assert "kept line" in text and "HTTP Request" not in text
     finally:
         root.handlers[:] = before
         root.setLevel(level)
+
+
+def test_progress_modes_choose_between_log_lines_and_plain_bars(caplog):
+    import logging as _logging
+    from corpus import progress
+    from corpus.progress import Progress, set_mode
+
+    caplog.set_level(_logging.INFO)
+    try:
+        set_mode("lines")
+        assert Progress(total=4, desc="a").bar is None                       # no terminal: log lines
+        set_mode("bars")
+        bar = Progress(total=4, desc="b", position=2, leave=False)
+        assert bar.bar is not None and bar.bar.pos == 0 and bar.bar.leave   # flat bar, kept on screen
+        bar.close()
+        with pytest.raises(ValueError):
+            set_mode("sometimes")
+    finally:
+        set_mode("auto")

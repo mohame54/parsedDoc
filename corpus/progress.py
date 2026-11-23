@@ -12,6 +12,7 @@ one plain log line (logger "progress", see corpus/logs.py) every tenth of the wo
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -20,6 +21,18 @@ from typing import Any, Iterable, Iterator
 from tqdm import tqdm
 
 log = logging.getLogger("progress")
+
+# auto: a live bar on a terminal, log lines everywhere else.  bars: a plain tqdm bar even without a terminal
+# (a notebook `!` cell that does show carriage-return bars, like Hugging Face's download bars).  lines: log lines always.
+MODES = ("auto", "bars", "lines")
+_mode = os.environ.get("PROGRESS_MODE", "auto")
+
+
+def set_mode(mode: str) -> None:
+    global _mode
+    if mode not in MODES:
+        raise ValueError(f"progress mode must be one of {MODES}")
+    _mode = mode
 
 TIME_STEP_SECONDS = 5.0       # without a terminal, a line at least this often so a long step never looks hung
 
@@ -42,7 +55,12 @@ class Progress:
         self._printed = False
         self.bar = None
         self._stop = None
-        if sys.stderr.isatty() and not self.disabled:
+        terminal = sys.stderr.isatty()
+        if not self.disabled and (_mode == "bars" or (_mode == "auto" and terminal)):
+            if not terminal:           # a pipe or notebook cell: flat bars (no cursor moves), a frame every few seconds
+                position, leave = None, True
+                kwargs.setdefault("mininterval", 3.0)
+                kwargs.setdefault("file", sys.stderr)
             self.bar = tqdm(iterable, total=total, desc=desc, unit=unit, initial=initial, leave=leave,
                             position=position, **kwargs)
         elif not self.disabled:

@@ -17,6 +17,7 @@ dependencies = [
   "onnxruntime>=1.18",
   "py3langid>=0.4.0",
   "torch>=2.14.1",
+  "modal>=1.6.4",
 ]
 
 [project.optional-dependencies]
