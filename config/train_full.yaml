@@ -1,0 +1,28 @@
+# Full fine-tuning of the language model (no LoRA), sharded with FSDP2. Needs several GPUs:
+#   torchrun --nproc_per_node 4 -m train.train --config train_full
+# The learning rate is 10x lower than LoRA's (1e-5 against 1e-4), as the LoRA literature recommends, with a
+# longer warmup because every weight moves. AdamW because torch's Muon cannot take FSDP2's sharded parameters (it
+# would fall back to AdamW anyway); with ddp on one node you can try `name: muon`, `muon_adjust: match_rms_adamw`
+# and muon_lr: 1.0e-5 (the AdamW learning rate carries over with that adjustment).
+extends: train.yaml
+
+lora:
+  enabled: false
+
+training:
+  strategy: fsdp2
+  epochs: 2
+  grad_accum: 4                # per GPU; the global batch is this times the number of GPUs
+
+optimizer:
+  name: adamw
+  lr: 1.0e-5
+  weight_decay: 0.05           # more regularisation than LoRA: all the weights are free
+  warmup_ratio: 0.1
+
+checkpoints:
+  out_dir: checkpoints/full
+  save_every: 100
+
+hub:
+  every_save: false            # a full checkpoint with optimizer state is many GB per push

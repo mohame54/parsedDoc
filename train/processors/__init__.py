@@ -19,7 +19,7 @@ from typing import Any
 
 from .base import BaseCollator, BaseTransform, NoFittingExample, PAD_TOKEN, SequenceTooLong, to_device
 from .deepseekOcr import (DeepSeekOCRCollator, DeepSeekOCRTransform, DeepSeekOCRV1Transform,
-                            DeepSeekOCRV2Transform, DeepSeekSpec, V1_SPEC, V2_SPEC)
+                            DeepSeekOCRV2Transform, DeepSeekSpec, V1_SPEC, V2_SPEC, deepseek_v2_batch_adapter)
 from .images import MERGE_MODES, as_rgb_page, letterbox, merge_page_images, merged_size
 from .instruct import InstructCollator, InstructTransform
 from .mixture import PRESETS, DatasetProcessor
@@ -33,6 +33,18 @@ def model_family(model_id: str | None) -> str:
     if any(marker in name for marker in V1_SPEC.markers):
         return "deepseek-v1"
     return "instruct"
+
+
+def batch_adapter_for(model_id: str | None):
+    """The function that turns the collator's batch into the model's forward arguments, or None when the batch
+    already uses the model's own names (generic chat-template models)."""
+    family = model_family(model_id)
+    if family == "deepseek-v2":
+        return deepseek_v2_batch_adapter
+    if family == "deepseek-v1":
+        raise ValueError("DeepSeek-OCR v1 has no batch adapter yet: use DeepSeek-OCR-2 "
+                         "(deepseek-community/DeepSeek-OCR-2)")
+    return None
 
 
 def create_transform(model_id: str | None, **kwargs: Any) -> BaseTransform:
@@ -49,7 +61,7 @@ __all__ = [
     "BaseTransform", "BaseCollator", "NoFittingExample", "SequenceTooLong", "PAD_TOKEN", "to_device",
     "InstructTransform", "InstructCollator",
     "DeepSeekOCRTransform", "DeepSeekOCRV1Transform", "DeepSeekOCRV2Transform", "DeepSeekOCRCollator",
-    "DeepSeekSpec", "V1_SPEC", "V2_SPEC",
+    "DeepSeekSpec", "V1_SPEC", "V2_SPEC", "deepseek_v2_batch_adapter", "batch_adapter_for",
     "DatasetProcessor", "PRESETS",
     "MERGE_MODES", "as_rgb_page", "letterbox", "merge_page_images", "merged_size",
     "create_transform", "model_family",

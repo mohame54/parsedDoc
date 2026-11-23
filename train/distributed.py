@@ -66,6 +66,14 @@ def barrier() -> None:
         dist.barrier()
 
 
+def all_reduce_sum(value: torch.Tensor) -> torch.Tensor:
+    """Sum over ranks of a tensor (returns a new tensor; identity on one process)."""
+    value = value.detach().clone()
+    if is_dist():
+        dist.all_reduce(value, op=dist.ReduceOp.SUM)
+    return value
+
+
 def all_reduce_mean(value: torch.Tensor) -> torch.Tensor:
     """Mean over ranks of a tensor (returns a new tensor; identity on one process)."""
     value = value.detach().clone()

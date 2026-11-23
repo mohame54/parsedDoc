@@ -242,3 +242,30 @@ class DeepSeekOCRCollator(BaseCollator):
         batch["images"] = [f["images"] for f in features]
         batch["images_spatial_crop"] = torch.cat([f["images_spatial_crop"] for f in features], dim=0)
         return batch
+
+
+def deepseek_v2_batch_adapter(batch: dict[str, Any]) -> dict[str, Any]:
+    """The collator's batch -> the keyword arguments of transformers' `DeepseekOcr2ForConditionalGeneration`.
+
+    The collator keeps the original DeepSeek-OCR layout: `images` is a list of (patches, global_view) per sample,
+    `images_spatial_crop` the tile grid, `images_seq_mask` the placeholder positions. The native model wants
+    `pixel_values` (one global view per sample), `pixel_values_local` (every sample's tiles, concatenated) and
+    `num_local_patches` (how many tiles each sample has), and finds the placeholders itself through its
+    `image_token_id`. A sample without tiles (a small image, or a mode without cropping) has a zero count; its
+    `patches` entry is only a placeholder and is not passed on. The pixel values and the number of image tokens
+    agree with `DeepseekOcr2Processor` (tests/test_deepseek_adapter.py checks the layout).
+    """
+    globals_, tiles, counts = [], [], []
+    for (patches, global_view), (columns, rows) in zip(batch["images"], batch["images_spatial_crop"].tolist()):
+        count = columns * rows if columns * rows > 1 else 0
+        globals_.append(global_view[0] if global_view.ndim == 4 else global_view)
+        counts.append(count)
+        if count:
+            tiles.append(patches[:count])
+    out = {key: batch[key] for key in ("input_ids", "attention_mask", "labels") if key in batch}
+    # The transform stores pixels in bfloat16 to save memory; the master weights are float32, so the pixels go in as
+    # float32 and autocast (or FSDP2's mixed precision) brings them down to the compute dtype together with the weights.
+    out["pixel_values"] = torch.stack(globals_).float()
+    out["pixel_values_local"] = torch.cat(tiles).float() if tiles else None
+    out["num_local_patches"] = counts
+    return out

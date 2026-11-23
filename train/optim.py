@@ -12,12 +12,14 @@ for every trainable parameter in that case (use DDP / single device to get Muon)
 """
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Any, Iterable
 
 import torch
 from torch import nn
 from torch.optim import AdamW, Muon, Optimizer
+from torch.optim.lr_scheduler import LambdaLR
 
 try:
     from torch.distributed.tensor import DTensor
@@ -119,3 +121,28 @@ def build_optimizer(
     adamw = (AdamW(adamw_params, lr=adamw_lr, weight_decay=weight_decay, betas=betas, eps=eps)
              if adamw_params else None)
     return MuonAdamW(muon, adamw)
+
+
+def build_scheduler(optimizer: Optimizer, total_steps: int, kind: str = "cosine", warmup_ratio: float = 0.05,
+                    min_lr_ratio: float = 0.1) -> LambdaLR:
+    """Linear warmup over `warmup_ratio` of the steps, then cosine / linear decay to `min_lr_ratio` x the base
+    learning rate (or flat for "constant"). It scales every param group, so Muon and AdamW follow the same curve.
+
+    `total_steps` is an estimate when batches are length-bucketed (the count varies a little per epoch): the
+    curve stops at its floor if the run is longer and ends slightly above it if shorter.
+    """
+    if kind not in ("cosine", "linear", "constant"):
+        raise ValueError("scheduler must be cosine, linear or constant")
+    total = max(int(total_steps), 1)
+    warmup = max(1, round(total * warmup_ratio)) if warmup_ratio > 0 else 0
+
+    def factor(step: int) -> float:
+        if warmup and step < warmup:
+            return (step + 1) / warmup
+        if kind == "constant":
+            return 1.0
+        progress = min(1.0, (step - warmup) / max(1, total - warmup))
+        decay = 1.0 - progress if kind == "linear" else 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * decay
+
+    return LambdaLR(optimizer, factor)

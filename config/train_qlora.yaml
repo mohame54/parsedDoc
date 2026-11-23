@@ -1,0 +1,20 @@
+# QLoRA: the base weights are loaded in 4 bit and only the adapters train. One process per GPU (single or ddp).
+# 2e-4 and dropout 0.1 are the QLoRA paper's settings for its 7B-13B models (it used 1e-4 and 0.05 for larger
+# ones); rank 16 / alpha 32 on every projection as in the default file.
+extends: train.yaml
+
+model:
+  quant: 4bit
+
+lora:
+  dropout: 0.1
+
+training:
+  strategy: single
+
+optimizer:
+  lr: 2.0e-4
+  weight_decay: 0.0            # the QLoRA paper trains the adapters without weight decay
+
+checkpoints:
+  out_dir: checkpoints/qlora

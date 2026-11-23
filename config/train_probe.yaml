@@ -1,0 +1,26 @@
+# Memory probe for a small GPU: a few steps with one maximum-length sample per batch.
+#   uv run --extra train python -m train.train --config train_probe
+# Read peak_mem_gb in the log: that is the memory of one sample plus the model. Then raise batch_tokens
+# (--batch-tokens 6400) and run again until it no longer fits; keep the largest value that does.
+extends: train.yaml
+
+batching:
+  batch_tokens: 3200
+  max_batch_size: 4
+
+optimizer:
+  scheduler: constant          # the learning rate does not matter for a memory test
+  warmup_ratio: 0
+
+training:
+  grad_accum: 1
+  max_steps: 8
+
+checkpoints:
+  out_dir: checkpoints/probe
+  save_every: 0
+  log_every: 1
+  tensorboard: false
+
+hub:
+  repo: null

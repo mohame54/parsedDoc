@@ -455,3 +455,91 @@ and on the OCR text after `labeller ocr`. Stage 1's own `language` code is then 
   (`py3langid`) separates languages that share a script, and is restricted to a candidate list because
   unrestricted it labels noisy OCR English as other languages.
 - The detected language is saved on each annotation as `language`. Remove the section to turn filtering off.
+
+## Training (`train/`)
+
+```bash
+uv run --extra train python -m train.stats data/export/unverified --model-id deepseek-community/DeepSeek-OCR-2   # lengths first
+uv run --extra train python -m train.train --config config/train.yaml                  # the whole run from one file
+uv run --extra train python -m train.train --config train_qlora --epochs 3 --batch-tokens 4800   # a flag changes one thing
+```
+
+**Which checkpoint.** Training uses transformers' own `DeepseekOcr2ForConditionalGeneration`, whose converted weights
+are `deepseek-community/DeepSeek-OCR-2`. The original `deepseek-ai/DeepSeek-OCR-2` repo ships custom code and
+does not load into the native class. The tokenizer is the same, so `train.stats` numbers do not change.
+`train.processors.deepseek_v2_batch_adapter` maps the loader's batch to the model's arguments (`pixel_values`,
+`pixel_values_local`, `num_local_patches`); its token counts and pixels match `DeepseekOcr2Processor`.
+
+### Config files (`config/train*.yaml`)
+
+A run is described by a YAML file instead of a long command. Precedence, lowest to highest: the built-in defaults,
+the file (and the files it `extends`), then flags, so `--epochs 3` changes only that for one run. `--config`
+takes a path or a name in `config/`.
+
+| file | for |
+|---|---|
+| `config/train.yaml` | the default: LoRA, bf16, bucketed batches, every setting listed and commented |
+| `config/train_probe.yaml` | the memory probe: 8 steps, one max-length sample per batch, logging every step |
+| `config/train_qlora.yaml` | 4-bit base weights with AdamW |
+| `config/train_full.yaml` | no LoRA, sharded with FSDP2 (`torchrun --nproc_per_node 4 -m train.train --config train_full`) |
+
+Sections are `model`, `lora` (`r`, `alpha`, `dropout`, `target_modules`), `data`, `batching`, `optimizer` (with the
+`scheduler`: linear warmup, then cosine or linear decay), `training`,
+`checkpoints` and `hub`; each key is the flag without its dashes. A variant starts with `extends: train.yaml` and
+lists only what differs. A misspelt section or key is an error with a suggestion, and a boolean from a file can be
+switched off with its `--no-...` flag (`--no-lora`, `--no-tensorboard`). Each run writes the settings it really used to
+`<out_dir>/resolved_config.yaml` (the Hub token is never written, and is not read from a file: use `HF_TOKEN`).
+
+### Batching and memory
+
+Examples range from about 280 to 5,000 tokens, so random fixed-size batches are mostly padding (66% when padded
+to `--max-length`, about 30% to the longest example in each batch). With `--batch-tokens N` every batch holds
+similar-length examples and as many of them as fit `N` padded tokens (at most `--max-batch-size`, 16 by
+default): short examples come in big batches, long ones in small batches, padding falls to a few percent, and
+the peak memory is set by `N`, not by the longest batch that happens to be drawn. On the pilot export the
+padding waste was 1-3% against 32% for random batches of 4.
+
+- `--max-length` is the longest sample you allow, in tokens with the image included. Anything longer is never
+  drawn (another task of the same document is tried first), and the count is logged. It must fit one batch:
+  `--max-length` rounded up to `--pad-multiple` (64) has to be at most `--batch-tokens`. Without `--max-length`
+  it defaults to `--batch-tokens`.
+- Batches are planned again at the start of each epoch (the task and format of every example are redrawn), so the
+  number of steps per epoch can differ by a few. Under DDP / FSDP2 every rank gets the same number of steps, and
+  the batches of one step are of similar length.
+- `--loss-weighting token` (the default with `--batch-tokens`) makes every target token count equally across a
+  gradient-accumulation window and across ranks, so a batch of short answers does not outweigh a batch of long
+  ones. `--loss-weighting batch` is the plain mean of the micro-batch losses (the default without bucketing).
+- `--compile` stays off by default. Batch shapes vary, so it keeps recompiling, and the padding saved is worth
+  far more than its gain.
+
+**Finding `--batch-tokens` on a small GPU.** The log line carries `peak_mem_gb`, the mean `batch_size` and
+`padded_tokens` of the last window. Run a few steps, read the peak, scale to your GPU and repeat:
+
+```bash
+uv run --extra train python -m train.train --config train_probe          # the same as the flags below
+uv run --extra train python -m train.train --config train_probe --batch-tokens 6400    # then a larger budget
+```
+
+`3200` tokens is one maximum-length sample, so `peak_mem_gb` there is the memory of one sample plus the model.
+If it fits, double `--batch-tokens` until it does not, then keep the largest value that fits.
+
+### Pushing checkpoints to the Hugging Face Hub
+
+```bash
+export HF_TOKEN=hf_...            # a token with write access
+uv run --extra train python -m train.train --config train.yaml --hub-repo your-name/ocr-sft --hub-every-save
+# or in the file:  hub: {repo: your-name/ocr-sft, private: true, every_save: true}
+```
+
+Uploads run in the background and a failed upload is a warning, not an error. Each push writes a folder:
+`last/` at every periodic save (`--save-every`, with `--hub-every-save`) and `final/` plus `last/` at the end:
+
+| file | content |
+|---|---|
+| `trainable.safetensors` | the trained weights (any strategy) |
+| `adapter_model.safetensors`, `adapter_config.json` | with `--lora`: a PEFT adapter, `PeftModel.from_pretrained(base, "your-name/ocr-sft", subfolder="last")` |
+| `training_state.pt` | weights, optimizer, scheduler and the position in the epoch, for resuming |
+| `run_config.json` | the command line and the step |
+
+Resume on another machine with `--resume hf://your-name/ocr-sft/last/training_state.pt` (the same flags as before).
+The training state holds the optimizer, so it is small with LoRA and many GB for full fine-tuning.

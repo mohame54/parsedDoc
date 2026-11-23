@@ -1,0 +1,79 @@
+# Default training run: LoRA on the language model, bf16, length-bucketed batches, warmup + cosine decay.
+#   uv run --extra train python -m train.train --config config/train.yaml
+# Precedence: built-in defaults < this file (and any `extends`) < command-line flags, so
+#   ... --config config/train.yaml --epochs 3 --batch-tokens 4800
+# changes only those two settings. Variants next to this file: train_probe.yaml (memory test),
+# train_qlora.yaml (4-bit base), train_full.yaml (no LoRA, FSDP2).
+#
+# Where the numbers come from (starting points, not tuned on your data; check the val loss):
+#  - LoRA on every attention and MLP projection, rank 16 / alpha 32, dropout 0.05: the usual recipe, also used by
+#    community DeepSeek-OCR fine-tunes (rank 16). "LoRA Without Regret" (thinkingmachines.ai/blog/lora) finds that
+#    adapting all weight matrices matters more than a high rank, and that the best LoRA learning rate is about
+#    10x the full fine-tuning one (here 1e-4 against 1e-5 in train_full.yaml).
+#  - AdamW, not Muon, for adapters: LoRA's A and B are 2D matrices, so Muon would pick them up, and Muon is not
+#    validated for adapters. Muon stays available for full fine-tuning (see train_full.yaml).
+#  - About 12 samples per optimizer step (grad_accum 6 x ~2 samples of a 3200-token batch, measured on the pilot
+#    export), 5% warmup, cosine decay to 10% of the peak, gradient clipping at 1.0, 2 epochs x 4 draws per document
+#    (every draw is a different task or format, so a document is seen 8 times in 8 different ways).
+
+model:
+  id: deepseek-community/DeepSeek-OCR-2   # the transformers-native checkpoint; deepseek-ai/DeepSeek-OCR-2 is the
+                                           # original custom-code one and does not load into the native class
+  ocr_mode: base               # image resolution: small | base | gundam (v2); tiny | large exist for v1
+  train_vision: false          # true also trains the vision tower and projector
+  quant: null                  # 4bit | 8bit for QLoRA (single or ddp only)
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: null         # null = the language model's attention and MLP projections; or a regex / list of names
+
+data:
+  root: data/export/unverified # the folder with train.jsonl (use data/export for verified licences only)
+  preset: structured           # task mix, see train/processors/mixture.py
+  descriptions: null           # JSON from `labeller describe-collect`; null = template descriptions
+  max_length: 3200             # longest sample in tokens, image included; longer ones are left out (python -m train.stats)
+  merge_pages: null            # vertical | horizontal | grid; null = the model's default
+  workers: 2
+  samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
+
+batching:
+  batch_tokens: 3200           # padded tokens per micro-batch (bucketed); set it from the memory probe, null = fixed batch_size
+  max_batch_size: 8            # most samples in one bucketed batch
+  pad_multiple: 64
+  batch_size: 2                # used only when batch_tokens is null
+  pad_to_max: false            # pad every sample to max_length (wasteful; not with batch_tokens)
+  loss_weighting: null         # token | batch; null = token when batch_tokens is set, else batch
+
+optimizer:
+  name: adamw                  # adamw | muon (Muon for 2D hidden matrices, AdamW for the rest)
+  lr: 1.0e-4                   # peak AdamW learning rate (LoRA: about 10x the full fine-tuning rate)
+  weight_decay: 0.01
+  muon_lr: 1.0e-4              # only with name: muon; with match_rms_adamw it can equal lr
+  muon_adjust: match_rms_adamw # original | match_rms_adamw (AdamW-scale lr) | spectral_unclamped
+  max_grad_norm: 1.0
+  scheduler: cosine            # cosine | linear | constant
+  warmup_ratio: 0.05           # share of the steps spent warming up
+  min_lr_ratio: 0.1            # the curve ends at this fraction of the peak
+
+training:
+  strategy: single             # single | ddp | fsdp2 (the last two run under torchrun)
+  epochs: 2
+  grad_accum: 6                # micro-batches per optimizer step
+  precision: auto              # auto (bf16 if supported, else fp16) | bf16 | fp16 | fp32
+  compile: false               # varying batch shapes make it recompile; leave off with bucketing
+  max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
+
+checkpoints:
+  out_dir: checkpoints/sft
+  save_every: 100              # optimizer steps; 0 = only the final checkpoint
+  log_every: 10
+  tensorboard: true
+  resume: null                 # a .pt file, or hf://user/repo/last/training_state.pt
+
+hub:
+  repo: null                   # user/name to push checkpoints to; the token comes from HF_TOKEN
+  private: true
+  every_save: false            # true = also push at every periodic save, not only at the end
