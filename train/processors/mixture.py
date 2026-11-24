@@ -20,6 +20,9 @@ PRESETS: dict[str, dict[str, float]] = {
     "structured": {"extract_to_schema": 3, "propose_schema": 3, "extract": 4, "schema": 1,
                    "field_qa": 1, "table": 1, "visual": 1, "figure": 1, "chart_qa": 1, "chart_trend": 1, "ocr": 1,
                    "classify": 0.5, "key_value": 0.5},
+    # for --train-vision: the visual and reasoning tasks are upweighted, the extraction core stays so it does not regress
+    "visual": {"extract_to_schema": 3, "extract": 3, "propose_schema": 1, "visual": 2, "table": 2, "figure": 2,
+               "chart_qa": 2, "chart_trend": 2, "checkbox_qa": 2, "table_qa": 2, "field_qa": 1, "ocr": 1},
     "balanced": {name: 1.0 for name in TASKS},
     "ocr": {"ocr": 1.0},
 }

@@ -52,6 +52,8 @@ class SFTConfig:
     batch_adapter: Callable[[dict], dict] | None = None   # maps collator keys to the model's forward kwargs
     val_loader: DataLoader | None = None
     eval_every: int = 0                        # validate every N optimizer steps (0 = at the end of each epoch only)
+    gen_eval: Any = None                       # train.gen_eval.GenerationEvaluator: generate answers and score them
+    gen_eval_every: int = 0                    # also every N steps (0 = before the first step and at the end)
     loss_weighting: str = "batch"              # batch: mean of the micro-batch losses | token: every target token equal
     max_steps: int = 0                         # stop after this many optimizer steps (0 = run all epochs); for memory probes
     hub: Any = None                            # train.hub.HubPusher on rank 0 (checkpoints go to a Hugging Face repo)
@@ -106,6 +108,8 @@ def train_sft(
     try:
         if cfg.val_loader is not None and global_step == 0:
             _validate(model, cfg, device, amp_dtype, logger, 0)      # the starting point to compare against
+        if cfg.gen_eval is not None and global_step == 0:
+            cfg.gen_eval.run(model, 0, logger)                       # the base model's answers, to compare against
         for epoch in range(start_epoch, cfg.epochs):
             if stop:
                 break
@@ -190,6 +194,8 @@ def train_sft(
 
                 if cfg.val_loader is not None and cfg.eval_every and global_step % cfg.eval_every == 0:
                     _validate(model, cfg, device, amp_dtype, logger, global_step)
+                if cfg.gen_eval is not None and cfg.gen_eval_every and global_step % cfg.gen_eval_every == 0:
+                    cfg.gen_eval.run(model, global_step, logger)
                 done = bool(cfg.max_steps) and global_step >= cfg.max_steps
                 if (cfg.save_every_steps and global_step % cfg.save_every_steps == 0) and not done:
                     next_epoch, next_batch = (epoch + 1, 0) if last else (epoch, consumed)
@@ -204,6 +210,8 @@ def train_sft(
 
         if cfg.val_loader is not None and stop:
             _validate(model, cfg, device, amp_dtype, logger, global_step)     # a run cut short by max_steps
+        if cfg.gen_eval is not None and not (cfg.gen_eval_every and global_step % cfg.gen_eval_every == 0):
+            cfg.gen_eval.run(model, global_step, logger)                      # the trained model's answers
         _save(model, opt, scheduler, global_step, out_dir,
               extra={"epoch": cfg.epochs, "next_batch": 0}, tag="final", hub=cfg.hub, final=True)
     finally:

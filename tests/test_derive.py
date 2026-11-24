@@ -31,7 +31,7 @@ def _record():
 def test_every_task_is_derived_and_deterministic():
     a = derive(_record(), random.Random(1))
     assert a == derive(_record(), random.Random(1))
-    figure_tasks = {"figure", "chart_qa", "chart_trend"}      # need figures or chart questions in the record
+    figure_tasks = {"figure", "chart_qa", "chart_trend", "table_qa"}      # need figures or chart questions in the record
     assert {e["task"] for e in a} == set(TASKS) - figure_tasks
     table = next(e for e in a if e["task"] == "table")
     assert table["messages"][-1]["content"].splitlines()[2] == "| x | y |"

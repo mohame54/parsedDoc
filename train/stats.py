@@ -69,12 +69,13 @@ def image_report(root: Path, split: str, merge: str | None, multiple: int = 28, 
     }
 
 
-def length_report(root: Path, split: str, transform, samples: int = 300, max_length: int | None = None) -> dict:
+def length_report(root: Path, split: str, transform, samples: int = 300, max_length: int | None = None,
+                  preset: str = "structured") -> dict:
     """Tokenised length (image tokens included) of real examples drawn the way training draws them."""
     from .dataset import DocumentDataset
     from .processors import DatasetProcessor
     transform.fixed_length, transform.max_length = False, None   # measure, do not pad or reject
-    dataset = DocumentDataset(root, split, DatasetProcessor(), samples_per_document=max(1, samples // 8))
+    dataset = DocumentDataset(root, split, DatasetProcessor(preset=preset), samples_per_document=max(1, samples // 8))
     by_task: dict[str, list[int]] = {}
     for i in Progress(range(min(samples, len(dataset))), desc="tokenising examples", unit="example", leave=False):
         item = dataset[i]
@@ -106,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model-id", help="Hugging Face model whose processor tokenises the examples")
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--samples", type=int, default=300)
+    parser.add_argument("--preset", default="structured", help="task mix to measure (e.g. visual)")
     add_arguments(parser)
     args = parser.parse_args(argv)
     configure(args)
@@ -115,14 +117,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.model_id:
         if model_family(args.model_id).startswith("deepseek"):
             transform = create_transform(args.model_id, mode=args.ocr_mode, merge_pages=args.merge or "grid")
-            report["tokens"] = length_report(root, args.split, transform, args.samples, args.max_length)
+            report["tokens"] = length_report(root, args.split, transform, args.samples, args.max_length, args.preset)
             report["tokens"]["measured_with"] = {"version": transform.version, "mode": args.ocr_mode,
                                                  "merge_pages": transform.merge_pages}
         else:
             size = tuple(int(x) for x in args.image_size.lower().split("x")) if args.image_size else \
                 report["images"]["suggested_image_size"]
             transform = create_transform(args.model_id, image_size=size, merge_pages=args.merge)
-            report["tokens"] = length_report(root, args.split, transform, args.samples, args.max_length)
+            report["tokens"] = length_report(root, args.split, transform, args.samples, args.max_length, args.preset)
             report["tokens"]["measured_with_image_size"] = size
     print(json.dumps(report, indent=2))
 

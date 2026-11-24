@@ -15,7 +15,8 @@ The file groups settings in sections; every key is the matching flag without its
                  max_documents, val_max_documents
     batching:    batch_size, batch_tokens, max_batch_size, pad_multiple, pad_to_max, loss_weighting
     optimizer:   name, lr, muon_lr, muon_adjust, weight_decay, max_grad_norm, scheduler, warmup_ratio, min_lr_ratio
-    training:    strategy, epochs, grad_accum, precision, compile, max_steps, chunked_loss, eval, eval_every
+    training:    strategy, epochs, grad_accum, precision, compile, max_steps, chunked_loss, eval, eval_every,
+                 gen_eval, gen_eval_every, gen_samples_per_task, gen_max_new_tokens, gen_batch_size
     checkpoints: out_dir, save_every, log_every, tensorboard, resume
     hub:         repo, private, every_save           (the token is never read from a file: use HF_TOKEN)
 
@@ -47,7 +48,9 @@ SECTIONS: dict[str, dict[str, str]] = {
                   "warmup_ratio": "warmup_ratio", "min_lr_ratio": "min_lr_ratio"},
     "training": {"strategy": "strategy", "epochs": "epochs", "grad_accum": "grad_accum", "precision": "precision",
                  "compile": "compile", "max_steps": "max_steps", "chunked_loss": "chunked_loss",
-                 "eval": "eval", "eval_every": "eval_every"},
+                 "eval": "eval", "eval_every": "eval_every", "gen_eval": "gen_eval",
+                 "gen_eval_every": "gen_eval_every", "gen_samples_per_task": "gen_samples_per_task",
+                 "gen_max_new_tokens": "gen_max_new_tokens", "gen_batch_size": "gen_batch_size"},
     "checkpoints": {"out_dir": "out_dir", "save_every": "save_every", "log_every": "log_every",
                     "tensorboard": "tensorboard", "resume": "resume"},
     "hub": {"repo": "hub_repo", "private": "hub_private", "every_save": "hub_every_save"},

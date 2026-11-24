@@ -110,6 +110,14 @@ and `chart_trend` (trend, highest value and a labelled value, computed from the 
 with estimated points are skipped). Previously labelled documents keep their v1/v2/v6 annotations and have no figures
 until Stage 2 is run again on them.
 
+**Visual reasoning tasks.** `checkbox_qa` ("is the box described as X checked?" -> yes/no, and "how many are checked?")
+and `table_qa` (a cell looked up by row and column, the row with the highest value, the number of rows) are computed from
+the labels, so their answers are exact. Descriptions that already give the state away, duplicates, tables with spans
+and non-numeric columns are skipped. They belong to the `visual` preset, which `--train-vision` selects unless you pass
+`--preset` (or set `data.preset` in the YAML); LoRA-only runs keep `structured`. `python -m train.stats ROOT --preset
+visual` shows the mix. The amount of chart data (about 300 ChartQA images) is unchanged: upweighting repeats those images,
+so add another chart source before relying on chart reasoning.
+
 Progress shows as a live bar in a terminal. Where there is no terminal (a notebook `!` command, a pipe or a log file), it is written as timestamped log lines on **stderr** instead (every tenth of the work and at least every 5 s, with a `still working` line while one step is slow). Logging is never held back by buffering, so `python -u` and `PYTHONUNBUFFERED` are not needed. Command results (a plan, `status`, the summaries) stay on stdout. Every CLI takes `--log-level {DEBUG,INFO,WARNING,ERROR}` and `--log-file PATH`; for the labeller they go before the command: `labeller --log-file labeller.log run`. Capture both streams with `> run.log 2>&1`.
 
 Downloads show progress: an overall `sources` bar, one bar per download (bytes for archives, documents for Hugging
@@ -553,6 +561,29 @@ The panels are the training loss (raw and smoothed) with the validation loss, th
 the peak GPU memory, tokens per second and the micro-batch size. The summary lists the first and last losses, the
 best validation loss and its step, skipped steps, and plain-language warnings (overfitting, validation loss no lower
 than at the start, every gradient clipped, `nan`). It needs only matplotlib (and tensorboard for `--tb`).
+
+### Does the model generate correct data? (`train/gen_eval.py`)
+
+The validation loss is teacher-forced: the model sees the reference up to each token. The generation check runs the
+model as it is used: page and prompt in, the answer generated, then compared with the reference. It is what shows
+that extracted fields are right, and that the JSON parses.
+
+```bash
+# a saved checkpoint, and the base model without the adapter for comparison (same --config as the training run)
+python -m train.gen_eval --config config/train.yaml --checkpoint checkpoints/lora_run/final_0000612.pt
+python -m train.gen_eval --config config/train.yaml --no-adapter
+```
+
+During training: `--gen-eval` (on in `config/train.yaml`) runs it before the first step (the base model) and at the end,
+and every `--gen-eval-every N` steps if given; `--gen-samples-per-task` examples of each task are generated.
+Scores: JSON answers get `json_valid` and the F1 of the (path, value) pairs (records are matched by `name` / `id`, not
+position); short answers an exact match; long text (OCR) a character similarity. The mean per task is logged and written to
+TensorBoard as `gen/score`, `gen/json_valid` and `gen/<task>`, and every generated answer is saved in
+`<out_dir>/generations/generations_step_N.jsonl` next to its reference, so you can read them.
+
+Generation is slow compared with a loss pass (a full extraction is about 2,000 tokens, decoded one at a time), which is
+why it is limited to a few examples per task and to the start and end of a run. Examples whose reference is longer than
+`--gen-max-new-tokens` (2048) are left out, so the longest extractions are not covered unless you raise it.
 
 ### Two GPUs (DDP), for example Kaggle's 2 x T4
 

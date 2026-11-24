@@ -109,3 +109,42 @@ def test_a_progress_total_that_was_an_estimate_grows_instead_of_passing_100_perc
     assert bar.total == 6
     assert not any("(1" in r.getMessage() and "%" in r.getMessage() and "(150%" in r.getMessage() for r in caplog.records)
     assert "6/6 step (100%)" in caplog.records[-1].getMessage()
+
+
+def test_under_torchrun_only_rank_zero_prints_info_lines(monkeypatch, capsys):
+    root = logging.getLogger()
+    before, level = list(root.handlers), root.level
+    try:
+        root.handlers[:] = []
+        monkeypatch.setenv("RANK", "1")
+        setup_logging("INFO")
+        logging.getLogger("train.sft").info("only rank 0 says this")
+        logging.getLogger("train.sft").warning("every rank says this")
+        err = capsys.readouterr().err
+        assert "only rank 0" not in err and "every rank says this" in err
+    finally:
+        root.handlers[:] = before
+        root.setLevel(level)
+
+
+def test_other_ranks_get_no_download_bars_or_repeated_warnings(monkeypatch):
+    import warnings
+    from huggingface_hub.utils import are_progress_bars_disabled, enable_progress_bars
+    from transformers.utils import logging as hf_logging
+
+    root = logging.getLogger()
+    before, level = list(root.handlers), root.level
+    saved = list(warnings.filters)
+    try:
+        root.handlers[:] = []
+        enable_progress_bars()
+        hf_logging.enable_progress_bar()
+        monkeypatch.setenv("RANK", "1")
+        setup_logging("INFO")
+        assert are_progress_bars_disabled() and not hf_logging.is_progress_bar_enabled()
+    finally:
+        root.handlers[:] = before
+        root.setLevel(level)
+        warnings.filters[:] = saved
+        enable_progress_bars()
+        hf_logging.enable_progress_bar()

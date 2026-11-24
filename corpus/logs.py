@@ -10,6 +10,7 @@ stdout with `print`, so they can still be piped.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from tqdm import tqdm
@@ -51,6 +52,9 @@ def setup_logging(level: str | int = "INFO", log_file: str | None = None) -> Non
         console: logging.Handler = TqdmHandler(stream) if stream.isatty() else logging.StreamHandler(stream)
         console.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
         console.addFilter(QuietLibraries())
+        if os.environ.get("RANK", "0") not in ("0", ""):
+            console.setLevel(logging.WARNING)       # under torchrun only rank 0 prints the INFO lines: no doubled log
+            _silence_other_ranks()
         setattr(console, _MARK, True)
         root.addHandler(console)
     if log_file and not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith(log_file) for h in handlers):
@@ -61,6 +65,20 @@ def setup_logging(level: str | int = "INFO", log_file: str | None = None) -> Non
         root.addHandler(out)
     for name in QUIET_LIBRARIES:                       # `--log-level DEBUG` brings their lines back
         logging.getLogger(name).setLevel(logging.WARNING if root.level > logging.DEBUG else logging.DEBUG)
+
+
+def _silence_other_ranks() -> None:
+    """Under torchrun only rank 0 shows anything: no download bars, no repeated Python warnings. Errors still
+    raise and print their traceback from any rank."""
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    if "huggingface_hub" in sys.modules:
+        from huggingface_hub.utils import disable_progress_bars
+        disable_progress_bars()
+    if "transformers" in sys.modules:
+        from transformers.utils import logging as hf_logging
+        hf_logging.disable_progress_bar()
 
 
 def add_arguments(parser) -> None:

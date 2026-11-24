@@ -32,7 +32,7 @@ lora:
 
 data:
   root: data/export/unverified # the folder with train.jsonl (use data/export for verified licences only)
-  preset: structured           # task mix, see train/processors/mixture.py
+  # preset: structured         # task mix, see train/processors/mixture.py; unset = visual with train_vision, else structured
   descriptions: null           # JSON from `labeller describe-collect`; null = template descriptions
   max_length: 3200             # longest sample in tokens, image included; longer ones are left out (python -m train.stats)
   merge_pages: null            # vertical | horizontal | grid; null = the model's default
@@ -69,6 +69,11 @@ training:
   max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
   eval: true                   # validation loss (val/loss in TensorBoard): before training, every eval_every steps, each epoch
   eval_every: 200              # steps between validations (0 = only at the end of each epoch)
+  gen_eval: true               # generation check: generate answers for validation examples and score them (slow)
+  gen_eval_every: 0            # also every N steps (0 = before the first step, with the base model, and at the end)
+  gen_samples_per_task: 2      # validation examples per task to generate
+  gen_max_new_tokens: 2048     # most tokens generated; examples with a longer reference are left out
+  gen_batch_size: 4
   chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
 
 checkpoints:

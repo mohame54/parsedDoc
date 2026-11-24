@@ -89,6 +89,9 @@ PROMPTS.update({
         "Using only the values shown in the chart, {question}",
     ],
 
+    "checkbox_qa": ["{question}", "Look at the form. {question}", "Answer briefly. {question}"],
+    "table_qa": ["{question}", "Look at the table. {question}", "Answer briefly. {question}"],
+
     "propose_schema": [
         "Design a {format} that captures the structured data in this document.",
         "Write the {format} a developer would use to store this kind of document.",
@@ -347,11 +350,81 @@ def _chart_trend(record: dict, rng: random.Random):
     return out[:_MAX_CHART_QUESTIONS]
 
 
+_MAX_CHECKBOX_QUESTIONS = 3
+_MAX_TABLE_QUESTIONS = 3
+_STATE_WORDS = ("check", "tick", "empty", "filled", "select", "marked", "blank", "cross")
+
+
+def _number(text: str) -> float | None:
+    cleaned = str(text).strip().replace(",", "").replace("$", "").replace("%", "").replace(" ", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _checkbox_qa(record: dict, rng: random.Random):
+    """Is this box checked / how many are checked. Answers come from the labelled states; a description that already
+    says the state, or that two boxes share on a page, is not used (the answer would be given away or ambiguous)."""
+    boxes = [e for e in record.get("visual_elements") or [] if e.get("type") == "checkbox"]
+    pages = list(range(len(record["images"])))
+    out = []
+    seen: dict[tuple, int] = {}
+    for e in boxes:
+        key = (e.get("page"), str(e.get("description", "")).strip().lower())
+        seen[key] = seen.get(key, 0) + 1
+    for e in boxes:
+        text = str(e.get("description", "")).strip()
+        if (e.get("state") in ("checked", "unchecked") and text and seen[(e.get("page"), text.lower())] == 1
+                and not any(w in text.lower() for w in _STATE_WORDS)):
+            out.append(({"question": f"Is the checkbox described as '{text}' checked? Answer yes or no."},
+                        "yes" if e["state"] == "checked" else "no", pages))
+    if boxes and all(e.get("state") in ("checked", "unchecked") for e in boxes):
+        for state in ("checked", "unchecked"):
+            out.append(({"question": f"How many checkboxes in this document are {state}?"},
+                        str(sum(e["state"] == state for e in boxes)), pages))
+    rng.shuffle(out)
+    return out[:_MAX_CHECKBOX_QUESTIONS]
+
+
+def _table_qa(record: dict, rng: random.Random):
+    """Lookups and arithmetic over a table's cells; the answers are computed, so they are exact. Tables with spans
+    or fewer than two data rows are skipped (the reading would not be unique)."""
+    out = []
+    for table in record.get("tables") or []:
+        headers = [str(h).strip() for h in table.get("headers") or []]
+        rows = [r for r in table.get("rows") or [] if r.get("row_type") == "data"]
+        if len(rows) < 2 or not headers:
+            continue
+        if any(int(c.get("row_span", 1)) > 1 or int(c.get("col_span", 1)) > 1 for r in rows for c in r.get("cells") or []):
+            continue
+        grid = [{int(c["column"]): str(c.get("text", "")).strip() for c in r["cells"]} for r in rows]
+        page, pages = int(table.get("page") or 1), [max(int(table.get("page") or 1) - 1, 0)]
+        where = f"the table on page {page}"
+        keys = [g.get(0, "") for g in grid]
+        out.append(({"question": f"How many data rows does {where} have?"}, str(len(rows)), pages))
+        for col, header in enumerate(headers):
+            cells = [g.get(col, "") for g in grid]
+            if col > 0 and header and headers[0] and all(keys) and len(set(keys)) == len(keys):
+                i = rng.randrange(len(rows))
+                if cells[i]:
+                    out.append(({"question": f"In {where}, what is the '{header}' value in the row where "
+                                             f"'{headers[0]}' is '{keys[i]}'?"}, cells[i], pages))
+            numbers = [_number(c) for c in cells]
+            if col > 0 and header and len(rows) >= 3 and all(n is not None for n in numbers) \
+                    and len(set(numbers)) == len(numbers) and all(keys):
+                out.append(({"question": f"In {where}, which row has the highest '{header}'? "
+                                         f"Give the '{headers[0]}' value."}, keys[numbers.index(max(numbers))], pages))
+    rng.shuffle(out)
+    return out[:_MAX_TABLE_QUESTIONS]
+
+
 TASKS: dict[str, Callable] = {
     "ocr": _ocr, "extract": _extract, "classify": _classify, "field_qa": _field_qa,
     "schema": _schema, "key_value": _key_value, "table": _table, "visual": _visual,
     "propose_schema": _propose_schema, "extract_to_schema": _extract_to_schema, "extract_format": _extract_format,
     "figure": _figure, "chart_qa": _chart_qa, "chart_trend": _chart_trend,
+    "checkbox_qa": _checkbox_qa, "table_qa": _table_qa,
 }
 _NEEDS_DESCRIBER = {"extract_to_schema"}
 

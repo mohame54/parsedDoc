@@ -40,7 +40,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--root", default=None, help="dataset root (see train/dataset.py)")
     p.add_argument("--model-id", default=None)
     p.add_argument("--strategy", choices=["single", "ddp", "fsdp2"], default="single")
-    p.add_argument("--preset", default="structured", help="DatasetProcessor preset")
+    p.add_argument("--preset", default=None,
+                   help="task mix (train/processors/mixture.py). Default: `visual` with --train-vision, else `structured`")
     p.add_argument("--descriptions", default=None,
                    help="attribute descriptions JSON from `labeller describe-collect` (templates are used without it)")
     p.add_argument("--max-length", type=int, default=None,
@@ -71,6 +72,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="also validate every N optimizer steps (0 = only at the end of each epoch)")
     p.add_argument("--val-max-documents", type=int, default=None,
                    help="validate on the first N documents of val.jsonl only (default: all)")
+    p.add_argument("--gen-eval", action=argparse.BooleanOptionalAction, default=False,
+                   help="generation check: generate answers for validation examples (page + prompt only) and score "
+                        "them, before the first step and at the end. Slower than the validation loss")
+    p.add_argument("--gen-eval-every", type=int, default=0, help="also run the generation check every N steps")
+    p.add_argument("--gen-samples-per-task", type=int, default=2, help="validation examples per task to generate")
+    p.add_argument("--gen-max-new-tokens", type=int, default=2048,
+                   help="most tokens to generate; examples whose reference is longer are left out")
+    p.add_argument("--gen-batch-size", type=int, default=4, help="examples generated at the same time")
     p.add_argument("--max-steps", type=int, default=0, help="stop after this many optimizer steps (memory probes)")
     p.add_argument("--hub-repo", default=None, help="push checkpoints to this Hugging Face repo (user/name)")
     p.add_argument("--hub-token", default=None, help="Hugging Face token (default: HF_TOKEN or the cached login)")
@@ -129,6 +138,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             p.error(f"{flag} is required (on the command line or in the config file)")
     if isinstance(args.lora_targets, str) and args.lora_targets.lstrip().startswith("["):
         p.error("--lora-targets takes a regex or comma-separated names; give a list in the YAML file")
+    if args.preset is None:
+        args.preset = "visual" if args.train_vision else "structured"
+        log.info("task mix: the `%s` preset (%s)", args.preset,
+                 "vision is trained, so visual reasoning tasks are upweighted" if args.train_vision else "default")
     return args
 
 
@@ -215,6 +228,15 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
         elif args.eval:
             log.warning("no val.jsonl in %s: training without a validation loss", args.root)
 
+        gen_eval = None
+        if args.gen_eval and (Path(args.root) / "val.jsonl").exists():
+            from .gen_eval import GenerationEvaluator
+            gen_eval = GenerationEvaluator(
+                args.root, transform, batch_adapter_for(args.model_id), samples_per_task=args.gen_samples_per_task,
+                preset=args.preset,
+                max_new_tokens=args.gen_max_new_tokens, batch_size=args.gen_batch_size,
+                max_documents=args.val_max_documents, precision=args.precision, out_dir=Path(args.out_dir) / "generations")
+
         log.info("loading the model %s (the first run downloads its weights)", args.model_id)
         load_dtype = weights_dtype(args, dtype)
         log.info("weights are loaded as %s (compute dtype %s)", str(load_dtype).removeprefix("torch."),
@@ -263,6 +285,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             out_dir=args.out_dir, resume=resolve_resume(args.resume, args.hub_token), tensorboard=args.tensorboard,
             compile=args.compile, loss_weighting=loss_weighting, max_steps=args.max_steps, hub=hub,
             batch_adapter=batch_adapter_for(args.model_id), val_loader=val_loader, eval_every=args.eval_every,
+            gen_eval=gen_eval, gen_eval_every=args.gen_eval_every,
         )
         runner = {"single": train_single, "ddp": train_ddp, "fsdp2": train_fsdp2}[args.strategy]
         result = runner(model, loader, make_optimizer, make_scheduler, cfg)
