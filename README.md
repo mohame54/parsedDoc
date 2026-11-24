@@ -542,6 +542,18 @@ On a remote machine (for example Modal), write the run to a persistent volume wi
 folder down and run `tensorboard --logdir <folder>` locally, or open a tunnel to port 6006 from the job.
 `config/train_large_gpu.yaml` is the starting point for a 40-80 GB card (bf16, 16,000 tokens per micro-batch).
 
+**After (or during) a run, without a TensorBoard server** (for example on Kaggle, where ports are not reachable):
+
+```bash
+python -m train.report train.log                         # a summary, and report.png with six panels
+python -m train.report --tb checkpoints/lora_run/tb      # the same from TensorBoard's event files
+```
+
+The panels are the training loss (raw and smoothed) with the validation loss, the gradient norm, the learning rate,
+the peak GPU memory, tokens per second and the micro-batch size. The summary lists the first and last losses, the
+best validation loss and its step, skipped steps, and plain-language warnings (overfitting, validation loss no lower
+than at the start, every gradient clipped, `nan`). It needs only matplotlib (and tensorboard for `--tb`).
+
 ### Two GPUs (DDP), for example Kaggle's 2 x T4
 
 ```bash
