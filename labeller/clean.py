@@ -63,25 +63,45 @@ def _months_named(raw: str) -> set[int]:
     return found
 
 
-def date_from_raw(normalized: str, raw: str) -> str | None:
-    """None when `normalized` is a good ISO rendering of `raw`, else the reason it is not."""
-    match = _ISO.fullmatch(normalized.strip())
-    if not match:
-        return "date_not_derivable"
-    year, month, day = (int(g) for g in match.groups())
-    try:
-        datetime.date(year, month, day)
-    except ValueError:
-        return "invalid_date"
-    numbers = [int(n) for n in re.findall(r"\d+", raw)]
-    for candidate in (year, year % 100):                      # the year, written in full or with two digits
-        if candidate in numbers:
+_ISO_MONTH = re.compile(r"(\d{4})-(\d{2})")
+_ISO_YEAR = re.compile(r"\d{4}")
+
+
+def _take(numbers: list[int], *options: int) -> list[int] | None:
+    """`numbers` without the first of `options` it contains, or None when none of them is there."""
+    for option in options:
+        if option in numbers:
             rest = list(numbers)
-            rest.remove(candidate)
-            if day in rest:
-                rest.remove(day)
-                if month in rest or month in _months_named(raw):
-                    return None
+            rest.remove(option)
+            return rest
+    return None
+
+
+def date_from_raw(normalized: str, raw: str) -> str | None:
+    """None when `normalized` (YYYY-MM-DD, YYYY-MM or YYYY) is a good rendering of `raw`, else the reason it is not."""
+    text = normalized.strip()
+    numbers = [int(n) for n in re.findall(r"\d+", raw)]
+    named = _months_named(raw)
+    if _ISO.fullmatch(text):
+        year, month, day = (int(g) for g in _ISO.fullmatch(text).groups())
+        try:
+            datetime.date(year, month, day)
+        except ValueError:
+            return "invalid_date"
+        rest = _take(numbers, year, year % 100)               # the year, written in full or with two digits
+        rest = _take(rest, day) if rest is not None else None
+        if rest is not None and (month in rest or month in named):
+            return None
+    elif _ISO_MONTH.fullmatch(text):                          # month and year, no day: "March 2017", "2 2019"
+        year, month = (int(g) for g in _ISO_MONTH.fullmatch(text).groups())
+        if not 1 <= month <= 12:
+            return "invalid_date"
+        rest = _take(numbers, year, year % 100)
+        if rest is not None and (month in rest or month in named):
+            return None
+    elif _ISO_YEAR.fullmatch(text):
+        if int(text) in numbers:
+            return None
     return "date_not_derivable"
 
 

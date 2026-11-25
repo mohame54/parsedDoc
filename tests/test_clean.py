@@ -35,6 +35,10 @@ def test_dates_must_be_real_and_written_in_the_raw_text():
     assert date_from_raw("2002-02-29", "29.02.2002") == "invalid_date"
     assert date_from_raw("2019-12-05", "Nov. 5, 2019") == "date_not_derivable"
     assert date_from_raw("5 Nov 2019", "5 Nov 2019") == "date_not_derivable"
+    assert date_from_raw("2017-03", "March 2017") is None and date_from_raw("2019-02", "2 2019") is None
+    assert date_from_raw("2019-02", "Feb. 2019") is None and date_from_raw("2019", "FY 2019") is None
+    assert date_from_raw("2019-03", "February 2019") == "date_not_derivable"      # the wrong month
+    assert date_from_raw("2017-13", "13 2017") == "invalid_date"
     out, notes = clean_field(_f("29.02.2002", "2002-02-29", "date"))
     assert out["normalized_value"] == "" and notes[0]["action"] == "invalid_date"
 
