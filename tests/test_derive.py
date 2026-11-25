@@ -90,7 +90,7 @@ def test_dataset_items_are_prompt_images_label_and_redraw_in_train(tmp_path):
     processor = DatasetProcessor(preset="structured")
     train = DocumentDataset(tmp_path, "train", processor)
     item = train[0]
-    assert set(item) == {"id", "task", "prompt", "images", "label"}
+    assert set(item) == {"id", "task", "prompt", "images", "label", "image_paths"}
     assert isinstance(item["prompt"], str) and isinstance(item["label"], str)
     assert isinstance(item["images"], list) and item["images"][0].size == (4, 4)
 

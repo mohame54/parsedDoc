@@ -83,7 +83,7 @@ def test_loader_transforms_in_collate_and_redraws(tmp_path):
     loader = make_loader(tmp_path, "train", DatasetProcessor(preset="structured"), batch_size=3,
                          transform=_transform(), samples_per_document=3, shuffle=False)
     item = loader.dataset[0]
-    assert set(item) == {"id", "task", "prompt", "images", "label"}          # the dataset stays raw
+    assert set(item) == {"id", "task", "prompt", "images", "label", "image_paths"}          # the dataset stays raw
     batch = next(iter(loader))
     assert batch["input_ids"].shape[0] == 3 and (batch["labels"] != -100).any()
 

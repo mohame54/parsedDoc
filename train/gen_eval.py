@@ -227,6 +227,7 @@ class GenerationEvaluator:
         rows = []
         for item, answer in zip(share, answers):
             rows.append({"id": item["id"], "task": item["task"], "reference": item["label"], "prediction": answer,
+                         "prompt": item["prompt"], "images": item.get("image_paths", []),
                          **score_example(answer, item["label"])})
         if dd.is_dist():
             gathered: list[Any] = [None] * dd.world_size()

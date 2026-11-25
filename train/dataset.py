@@ -89,7 +89,7 @@ class DocumentDataset(Dataset):
         prompt = next(part["text"] for part in reversed(example["messages"][0]["content"]) if part["type"] == "text")
         images = [self._open(rel) for rel in example["images"]] if self.load_images else example["images"]
         return {"id": example["id"], "task": example["task"], "prompt": prompt, "images": images,
-                "label": example["messages"][-1]["content"]}
+                "label": example["messages"][-1]["content"], "image_paths": list(example["images"])}
 
     def length_of(self, epoch: int, index: int, token_length: Callable[[list, str, str], int]) -> int:
         """Token length of what `__getitem__((epoch, index))` returns, without decoding any image: the same
