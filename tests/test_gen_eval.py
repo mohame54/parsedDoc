@@ -49,7 +49,7 @@ def test_the_summary_averages_per_task_and_counts_valid_json():
             {"task": "classify", "kind": "short", "exact_match": True, "score": 1.0}]
     out = summarise(rows)
     assert out["examples"] == 3 and out["per_task"]["extract"] == {"n": 2, "score": 0.25, "json_valid": 0.5,
-                                                                    "path_f1": 0.5, "kind": "json"}
+                                                                    "path_f1": 0.5, "strict_f1": None, "kind": "json"}
     assert out["per_task"]["classify"]["score"] == 1.0 and out["json_valid"] == 0.5
 
 
@@ -157,3 +157,15 @@ def test_the_loop_runs_the_generation_check_at_the_start_every_n_steps_and_at_th
     result = train_sft(2, model, torch.optim.SGD(model.parameters(), lr=0.01), loader, None, 0, cfg=cfg)
     assert calls[0] == 0 and calls[-1] == result["step"]
     assert set(range(3, result["step"] + 1, 3)) <= set(calls) and len(calls) == len(set(calls))
+
+
+def test_scoring_forgives_spacing_punctuation_and_slips_but_not_wrong_values():
+    from train.gen_eval import value_credit
+    ref = json.dumps({"name": "Bistecca RestaurantPtaLtd", "addr": "25 Mohamed Sultan Rd S(238969)", "total": "514.35"})
+    close = json.dumps({"name": "Bistecca RestaurantPteLtd", "addr": "25 Mohamed Sultan Rd S (238969)", "total": "514.350"})
+    out = score_example(close, ref)
+    assert out["strict_f1"] < 0.5 and out["score"] > 0.95                  # spacing, a one-letter slip, 514.350
+    assert value_credit("T.G.I.FRIDAY'S", "T.G.I. FRIDAY'S") == 1.0
+    assert value_credit("0359 Table 997 #Party 1", "211 W 34th St, New York, NY 10001") == 0.0
+    assert value_credit("12", "21") == 0.0 and value_credit("1,200", "1200") == 1.0
+    assert score_example("ACME-Inc", "acme inc")["score"] == 1.0           # short answers: punctuation ignored

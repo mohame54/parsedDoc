@@ -12,9 +12,11 @@ During training the same check runs before the first step (the base model) and a
 
 How an answer is scored (chosen from the reference, so every task is covered):
   * JSON answers (extract, schema, tables, figures, ...): `json_valid` (does it parse), and the F1 of the (path, value)
-    pairs against the reference, plus `path_f1` (right structure, wrong values still count). Lists of records are
+    pairs against the reference. A value counts fully when it is the same up to case, spacing and punctuation (or the
+    same number) and partly when it is at least 85% similar (a one-character slip); `strict_f1` is the all-or-nothing
+    version, `path_f1` ignores the values (right structure, wrong values still count). Lists of records are
     matched by their `name` / `id` and not by position, so a different order is not an error.
-  * short answers (classify, a field's value, a chart question): normalised exact match.
+  * short answers (classify, a field's value, a chart question): match after case, spacing and punctuation are removed.
   * long text (OCR): character similarity (difflib ratio) of the normalised text.
 The score of every example is between 0 and 1; the summary gives the mean per task and overall. Every generated answer
 is written to `generations_step_N.jsonl` so you can read them.
@@ -93,21 +95,66 @@ def _f1(predicted: set, reference: set) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+SOFT_THRESHOLD = 0.85          # a value at least this similar to the reference earns partial credit
+
+
+def squash(text: Any) -> str:
+    """Case, spacing and punctuation removed: `S (238969)` and `S(238969)` are the same value."""
+    return re.sub(r"[\W_]+", "", str(text).casefold())
+
+
+def _number(text: str) -> float | None:
+    try:
+        return float(str(text).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def value_credit(predicted: str, reference: str) -> float:
+    """0..1 for one value: 1 when it is the same up to case, spacing and punctuation (or the same number), the
+    character similarity when it is close (>= SOFT_THRESHOLD), else 0. A read-off error of one character is not a
+    wrong answer, a different value is."""
+    if predicted == reference:
+        return 1.0
+    a, b = squash(predicted), squash(reference)
+    if a == b:
+        return 1.0
+    x, y = _number(predicted), _number(reference)
+    if x is not None and y is not None:
+        return 1.0 if abs(x - y) <= 1e-9 * max(1.0, abs(y)) else 0.0
+    ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    return round(ratio, 4) if ratio >= SOFT_THRESHOLD else 0.0
+
+
+def soft_f1(predicted: dict[str, str], reference: dict[str, str]) -> float:
+    """F1 over the (path, value) pairs where a value counts by its `value_credit` instead of all or nothing."""
+    if not predicted and not reference:
+        return 1.0
+    credit = sum(value_credit(value, reference[path]) for path, value in predicted.items() if path in reference)
+    if not credit:
+        return 0.0
+    precision, recall = credit / len(predicted), credit / len(reference)
+    return 2 * precision * recall / (precision + recall)
+
+
 def score_example(prediction: str, reference: str) -> dict[str, Any]:
-    """Metrics of one answer. `kind` says how it was judged; `score` is the number to average."""
+    """Metrics of one answer. `kind` says how it was judged; `score` is the number to average. For JSON `score` is
+    the tolerant `value_f1` (spacing, punctuation and one-character slips forgiven); `strict_f1` is the exact one."""
     ref_json = extract_json(reference) if reference.lstrip()[:1] in "{[" else None
     if ref_json is not None:
         pred_json = extract_json(prediction)
         valid = pred_json is not None
         ref_pairs = flatten(ref_json)
         pred_pairs = flatten(pred_json) if valid else {}
-        value_f1 = _f1(set(pred_pairs.items()), set(ref_pairs.items()))
+        strict = _f1(set(pred_pairs.items()), set(ref_pairs.items()))
+        value_f1 = soft_f1(pred_pairs, ref_pairs)
         path_f1 = _f1(set(pred_pairs), set(ref_pairs))
         return {"kind": "json", "json_valid": valid, "path_f1": round(path_f1, 4), "value_f1": round(value_f1, 4),
-                "score": round(value_f1, 4)}
+                "strict_f1": round(strict, 4), "score": round(value_f1, 4)}
     if len(reference.split()) <= SHORT_ANSWER_WORDS:
-        match = normalise(prediction) == normalise(reference)
-        return {"kind": "short", "exact_match": match, "score": float(match)}
+        strict = normalise(prediction) == normalise(reference)
+        match = strict or (bool(squash(reference)) and squash(prediction) == squash(reference))
+        return {"kind": "short", "exact_match": strict, "score": float(match)}
     ratio = difflib.SequenceMatcher(None, normalise(prediction), normalise(reference), autojunk=False).ratio()
     return {"kind": "text", "similarity": round(ratio, 4), "score": round(ratio, 4)}
 
@@ -126,7 +173,7 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
                            "json_valid": mean(results, "json_valid"), "per_task": {}}
     for task, rows in sorted(by_task.items()):
         out["per_task"][task] = {"n": len(rows), "score": mean(rows, "score"), "json_valid": mean(rows, "json_valid"),
-                                 "path_f1": mean(rows, "path_f1"), "kind": rows[0]["kind"]}
+                                 "path_f1": mean(rows, "path_f1"), "strict_f1": mean(rows, "strict_f1"), "kind": rows[0]["kind"]}
     return out
 
 

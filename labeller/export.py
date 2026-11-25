@@ -25,6 +25,7 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+from .clean import clean_record
 from .config import AnnotationConfig
 from .pipeline import page_paths
 from .store import Store, read_json, safe_name, write_json
@@ -138,7 +139,7 @@ def _record(store: Store, doc_id: str, doc: dict, annotation: dict, copy_images:
             "provenance": annotation.get("provenance"),
         },
     }
-    return {"family_id": annotation["family_id"], "canonical": canonical}
+    return {"family_id": annotation["family_id"], "canonical": clean_record(canonical)}
 
 
 OCR_PROMPT = "Transcribe all text on this page exactly as written, in reading order."
