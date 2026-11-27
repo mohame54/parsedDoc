@@ -20,6 +20,14 @@ def _cross_entropy_sum(lm_head: nn.Module, states: torch.Tensor, wanted: torch.T
     return torch.nn.functional.cross_entropy(lm_head(states).float(), wanted, reduction="sum")
 
 
+def parse_targets(value: Any) -> Any:
+    """LoRA target modules from a flag or YAML value: a regex string stays one; "q_proj,v_proj" or a list becomes a
+    list of module names."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [part.strip() for part in value.split(",")] if "," in value and "(" not in value else value
+
+
 class DeepSeekOCR(nn.Module):
     """Thin wrapper around a HF DeepseekOcr*ForConditionalGeneration model that lets
     the language side and the vision side be trained (or frozen) independently.
@@ -52,6 +60,7 @@ class DeepSeekOCR(nn.Module):
         self.vision_trained = vision_trained
         self.quantization = quantization
         self.lora_enabled = False
+        self.lineage: list[dict[str, Any]] = []   # adapters merged into the base before the current one (continue_from)
         self.chunked_loss = True
         self.apply_training()
 
@@ -168,6 +177,70 @@ class DeepSeekOCR(nn.Module):
         self.lora_enabled = True
         self.apply_training()
 
+    def lora_config_dict(self) -> dict[str, Any] | None:
+        """The attached adapter's shape (r, alpha, dropout, target modules), or None without LoRA."""
+        if not self.lora_enabled:
+            return None
+        cfg = self.model.peft_config["default"]
+        targets = cfg.target_modules
+        return {"r": cfg.r, "alpha": cfg.lora_alpha, "dropout": cfg.lora_dropout,
+                "target_modules": sorted(targets) if isinstance(targets, (set, list, tuple)) else targets}
+
+    def continue_from(self, checkpoint: str | os.PathLike, r: int = 16, alpha: int = 32, dropout: float = 0.05,
+                      target_modules: str | list[str] | None = None, old_r: int | None = None,
+                      old_alpha: int | None = None, old_target_modules: str | list[str] | None = None,
+                      token: str | None = None) -> dict[str, Any]:
+        """Start a new stage from an earlier adapter, with a LoRA configuration of its own.
+
+        The earlier adapter is loaded and MERGED into the base weights, then a fresh adapter (`r`, `alpha`, ...) is
+        attached for the new stage. A checkpoint's adapter is relative to the base plus every adapter merged before
+        it, so the whole chain recorded in the checkpoint (`lineage`) is replayed first: load, merge, repeat. The
+        checkpoint's own adapter shape is read from it; `old_r` / `old_alpha` / `old_target_modules` are only for
+        checkpoints written before that was stored (they default to the standard targets). Needs an unquantized base (a quantized one cannot be merged into).
+
+        Returns the checkpoint's metadata. Optimizer, scheduler and step are NOT restored: this is a new run (use
+        --resume to carry on the same one)."""
+        from .hub import resolve_resume
+        if self.lora_enabled:
+            raise RuntimeError("continue_from must come before add_lora: it merges the old adapter first")
+        if self.quantization is not None:
+            raise RuntimeError("cannot merge an earlier adapter into a quantized base; continue from an unquantized "
+                               "model (the new stage can still be LoRA)")
+        path = resolve_resume(str(checkpoint), token)
+        head = torch.load(path, map_location="cpu", weights_only=False)
+        chain = list(head.get("lineage") or [])
+        stored = head.get("lora_config") or {}
+        this = {"path": str(checkpoint), "r": stored.get("r", old_r), "alpha": stored.get("alpha", old_alpha),
+                "target_modules": stored.get("target_modules") or old_target_modules}
+        if bool(head.get("lora", False)):
+            if this["r"] is None or this["alpha"] is None:
+                raise ValueError("this checkpoint does not record its LoRA shape (it predates that); pass the old "
+                                 "r and alpha (--init-lora-r / --init-lora-alpha)")
+            chain.append(this)
+            for entry in chain:                                  # base + A, then + B, ...
+                self._merge_checkpoint(entry, token)
+        else:                                                    # a full fine-tune: its weights simply replace the base's
+            self.load_checkpoint(path)
+        self.lineage = chain
+        kwargs = {} if target_modules is None else {"target_modules": target_modules}
+        self.add_lora(r=r, alpha=alpha, dropout=dropout, **kwargs)
+        return {k: head.get(k) for k in ("step", "extra")}
+
+    def _merge_checkpoint(self, entry: dict[str, Any], token: str | None = None) -> None:
+        from .hub import resolve_resume
+        try:
+            path = resolve_resume(entry["path"], token)
+            if not path or not Path(path).exists():
+                raise FileNotFoundError(path)
+        except Exception as error:
+            raise FileNotFoundError(
+                f"cannot replay the adapter chain: {entry['path']} is missing ({error}). Every earlier checkpoint in "
+                "the lineage must still be reachable at the path it had when the next stage started.") from error
+        kwargs = {} if not entry.get("target_modules") else {"target_modules": entry["target_modules"]}
+        self.add_lora(r=entry["r"], alpha=entry["alpha"], dropout=0.0, **kwargs)
+        self.load_checkpoint(path)
+        self.merge_and_unload()
+
     def save_lora(self, save_dir: str | os.PathLike) -> None:
         """Adapter-only export (small); reload with ``load_lora`` on a freshly built base."""
         if not self.lora_enabled:
@@ -225,6 +298,15 @@ class DeepSeekOCR(nn.Module):
                                        wanted[start:start + LOSS_CHUNK], use_reentrant=False)
         return SimpleNamespace(loss=total / keep.sum().clamp(min=1), logits=None)
 
+    def enable_grad_checkpointing(self) -> int:
+        """Recompute activations during backward instead of storing them (about 3-5x less activation memory for
+        roughly a third more compute). Covers the decoder layers and, when it trains, the vision tower: the HF
+        model's layers checkpoint themselves while in train mode, so evaluation and generation are unaffected.
+        Non-reentrant, so frozen inputs (LoRA over a frozen base) need no extra hooks. Returns how many layers do it."""
+        self.base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        self.base.config.use_cache = False
+        return sum(1 for m in self.base.modules() if getattr(m, "gradient_checkpointing", False))
+
     def compile(self, **compile_kwargs: Any) -> None:
         """Compile only the language model and lm_head (not the whole wrapper).
 
@@ -273,6 +355,8 @@ class DeepSeekOCR(nn.Module):
             "model": model_state,
             "trainable_only": trainable_only,
             "lora": self.lora_enabled,
+            "lora_config": self.lora_config_dict(),
+            "lineage": self.lineage,
             "lang_trained": self.lang_trained,
             "vision_trained": self.vision_trained,
             "step": step,
@@ -310,7 +394,7 @@ class DeepSeekOCR(nn.Module):
             optimizer.load_state_dict(ckpt["optimizer"])
         if scheduler is not None and ckpt.get("scheduler") is not None:
             scheduler.load_state_dict(ckpt["scheduler"])
-        return {k: ckpt.get(k) for k in ("step", "extra", "lang_trained", "vision_trained")}
+        return {k: ckpt.get(k) for k in ("step", "extra", "lang_trained", "vision_trained", "lora_config", "lineage")}
 
     def save_pretrained(self, save_dir: str | os.PathLike, **kwargs: Any) -> None:
         """Export the wrapped HF model. With LoRA attached this writes the adapter only."""

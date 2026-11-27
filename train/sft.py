@@ -30,6 +30,7 @@ from corpus.progress import Progress
 
 from . import distributed as dd
 from .dataset import set_epoch
+from .hub import state_name
 from .metrics import MetricLogger
 from .processors.base import to_device
 
@@ -57,6 +58,11 @@ class SFTConfig:
     loss_weighting: str = "batch"              # batch: mean of the micro-batch losses | token: every target token equal
     max_steps: int = 0                         # stop after this many optimizer steps (0 = run all epochs); for memory probes
     hub: Any = None                            # train.hub.HubPusher on rank 0 (checkpoints go to a Hugging Face repo)
+    kind: str = "sft"                          # what is being trained: picks the metrics of the checkpoint reports
+    state_prefix: str = ""                     # put before every checkpoint / report / hub folder name (sft, rl, ...)
+    reports: bool = True                       # a metrics report with graphs next to every checkpoint
+    gen_eval_at_save: bool = True              # validate and generate at every checkpoint, so each report has fresh numbers
+    run_config: dict[str, Any] | None = None   # the settings of the run, shown in every report
 
 
 def train_sft(
@@ -95,7 +101,24 @@ def train_sft(
              else "mean of the micro-batch losses")
     logger = MetricLogger(out_dir / "tb", is_main=dd.is_main(), log_every=cfg.log_every,
                           total_steps=total_steps, tensorboard=cfg.tensorboard,
-                          initial_step=global_step)
+                          initial_step=global_step, history_path=out_dir / "metrics.jsonl")
+
+    evaluated = {"val": -1, "gen": -1}                 # the step each evaluation last ran at, so none runs twice
+
+    def run_validation(at: int) -> None:
+        _validate(model, cfg, device, amp_dtype, logger, at)
+        evaluated["val"] = at
+
+    def run_generation(at: int) -> None:
+        cfg.gen_eval.run(model, at, logger)
+        evaluated["gen"] = at
+
+    def evaluate_before_save(at: int) -> None:
+        """A checkpoint's report should hold numbers measured at that very step."""
+        if cfg.val_loader is not None and evaluated["val"] != at:
+            run_validation(at)
+        if cfg.gen_eval is not None and cfg.gen_eval_at_save and evaluated["gen"] != at:
+            run_generation(at)
 
     # Running sums over the current logging window; reduced across ranks only on log steps.
     loss_sum = torch.zeros((), device=device)          # sum of loss x target tokens (or x 1 per micro-batch)
@@ -107,9 +130,9 @@ def train_sft(
     stop = False
     try:
         if cfg.val_loader is not None and global_step == 0:
-            _validate(model, cfg, device, amp_dtype, logger, 0)      # the starting point to compare against
+            run_validation(0)                                        # the starting point to compare against
         if cfg.gen_eval is not None and global_step == 0:
-            cfg.gen_eval.run(model, 0, logger)                       # the base model's answers, to compare against
+            run_generation(0)                                        # the base model's answers, to compare against
         for epoch in range(start_epoch, cfg.epochs):
             if stop:
                 break
@@ -193,27 +216,29 @@ def train_sft(
                     window_samples = window_padded = window_batches = 0
 
                 if cfg.val_loader is not None and cfg.eval_every and global_step % cfg.eval_every == 0:
-                    _validate(model, cfg, device, amp_dtype, logger, global_step)
+                    run_validation(global_step)
                 if cfg.gen_eval is not None and cfg.gen_eval_every and global_step % cfg.gen_eval_every == 0:
-                    cfg.gen_eval.run(model, global_step, logger)
+                    run_generation(global_step)
                 done = bool(cfg.max_steps) and global_step >= cfg.max_steps
                 if (cfg.save_every_steps and global_step % cfg.save_every_steps == 0) and not done:
                     next_epoch, next_batch = (epoch + 1, 0) if last else (epoch, consumed)
+                    evaluate_before_save(global_step)
                     _save(model, opt, scheduler, global_step, out_dir,
-                          extra={"epoch": next_epoch, "next_batch": next_batch}, hub=cfg.hub)
+                          extra={"epoch": next_epoch, "next_batch": next_batch}, hub=cfg.hub, cfg=cfg, logger=logger)
                 if done:
                     stop = True
                     break
 
-            if cfg.val_loader is not None and not stop and not (cfg.eval_every and global_step % cfg.eval_every == 0):
-                _validate(model, cfg, device, amp_dtype, logger, global_step)
+            if cfg.val_loader is not None and not stop and evaluated["val"] != global_step:
+                run_validation(global_step)                                   # the end of the epoch
 
-        if cfg.val_loader is not None and stop:
-            _validate(model, cfg, device, amp_dtype, logger, global_step)     # a run cut short by max_steps
-        if cfg.gen_eval is not None and not (cfg.gen_eval_every and global_step % cfg.gen_eval_every == 0):
-            cfg.gen_eval.run(model, global_step, logger)                      # the trained model's answers
+        if cfg.val_loader is not None and stop and evaluated["val"] != global_step:
+            run_validation(global_step)                                       # a run cut short by max_steps
+        if cfg.gen_eval is not None and evaluated["gen"] != global_step:
+            run_generation(global_step)                                       # the trained model's answers
+        evaluate_before_save(global_step)                                     # (a no-op when both just ran)
         _save(model, opt, scheduler, global_step, out_dir,
-              extra={"epoch": cfg.epochs, "next_batch": 0}, tag="final", hub=cfg.hub, final=True)
+              extra={"epoch": cfg.epochs, "next_batch": 0}, tag="final", hub=cfg.hub, final=True, cfg=cfg, logger=logger)
     finally:
         logger.close()
         if cfg.hub is not None:
@@ -330,18 +355,43 @@ def _validate(model, cfg: "SFTConfig", device, amp_dtype, logger, step: int) -> 
     return value
 
 
+def _write_report(model: nn.Module, cfg: "SFTConfig", logger, step: int, out_dir: Path, extra: dict[str, Any],
+                  name: str, final: bool) -> Path | None:
+    """The metrics report of this checkpoint (and the refreshed comparison of all of them). A failure here only costs
+    the report, never the run."""
+    try:
+        from .ckpt_report import build_checkpoint_report, write_index
+        generations = None
+        if cfg.gen_eval is not None and getattr(cfg.gen_eval, "out_dir", None):
+            candidate = Path(cfg.gen_eval.out_dir) / f"generations_step_{step:07d}.jsonl"
+            generations = candidate if candidate.exists() else None
+        report = build_checkpoint_report(
+            logger.history, step, out_dir / "reports" / name, kind=cfg.kind, name=name, run_config=cfg.run_config,
+            extra=extra, generations=generations, final=final, lineage=getattr(dd.unwrap(model), "lineage", None))
+        write_index(out_dir / "reports")
+        return report
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("could not write the report of step %d: %s", step, exc)
+        return None
+
+
 def _save(model: nn.Module, opt, scheduler, step: int, out_dir: Path, extra: dict[str, Any],
-          tag: str | None = None, hub: Any = None, final: bool = False) -> None:
+          tag: str | None = None, hub: Any = None, final: bool = False, cfg: "SFTConfig | None" = None,
+          logger: Any = None) -> None:
     # Gathering is collective (FSDP2): every rank calls it, only rank 0 writes.
     model_state = dd.gather_trainable_state(model)
     opt_state = dd.gather_optimizer_state(model, opt)
     if dd.is_main():
-        name = f"{tag or 'step'}_{step:07d}.pt"
+        name = state_name(cfg.state_prefix if cfg is not None else "", step, final)
         path = dd.unwrap(model).save_checkpoint(
-            out_dir / name, scheduler=scheduler, step=step, extra=extra,
+            out_dir / f"{name}.pt", scheduler=scheduler, step=step, extra=extra,
             model_state=model_state, optimizer_state=opt_state)
+        report = None
+        if cfg is not None and cfg.reports and logger is not None:
+            report = _write_report(model, cfg, logger, step, out_dir, extra, name, final)
         if hub is not None:
-            hub.push(step, model_state, training_state=path, final=final, lora_config=_lora_config(model))
+            hub.push(step, model_state, training_state=path, final=final, lora_config=_lora_config(model),
+                     report_dir=report)
     dd.barrier()
 
 
