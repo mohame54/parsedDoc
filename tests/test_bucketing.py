@@ -164,7 +164,7 @@ def test_adapter_keys_follow_the_peft_convention():
     assert keys == {"base_model.model.layer.lora_A.weight", "base_model.model.layer.lora_B.weight"}
 
 
-def test_push_stages_a_folder_and_final_goes_to_final_and_last(tmp_path):
+def test_push_stages_a_folder_and_the_final_save_has_its_own_folder(tmp_path):
     api = FakeApi()
     pusher = HubPusher("me/ocr", every_save=False, api=api, stage_dir=tmp_path / "stage", run_config={"hub_token": "x", "lr": 1})
     ckpt = tmp_path / "step.pt"
@@ -174,18 +174,19 @@ def test_push_stages_a_folder_and_final_goes_to_final_and_last(tmp_path):
     pusher.push(20, _state(), ckpt, final=True)
     pusher.close()
     targets = [u[0] for u in api.uploads]
-    assert targets == ["final", "last"]
+    assert targets == ["final_0000020"]                                   # its own folder, no `last` unless asked for
     files = api.uploads[0][1]
     assert {"trainable.safetensors", "training_state.pt", "run_config.json"} <= set(files)
     assert "adapter_model.safetensors" not in files                       # no LoRA config given
     assert api.created[0]["repo_id"] == "me/ocr" and api.created[0]["exist_ok"]
 
 
-def test_every_save_pushes_last_and_a_failing_upload_never_raises(tmp_path):
+def test_every_save_gets_its_own_folder_and_a_failing_upload_never_raises(tmp_path):
     api = FakeApi()
     pusher = HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "s")
     pusher.push(5, _state(), None, final=False)
-    assert [u[0] for u in api.uploads] == ["last"]
+    pusher.push(10, _state(), None, final=False)
+    assert [u[0] for u in api.uploads] == ["step_0000005", "step_0000010"]      # nothing is overwritten
     broken = HubPusher("me/ocr", every_save=True, api=FakeApi(fail=True), stage_dir=tmp_path / "b")
     broken.push(5, _state(), None, final=False)                           # must not raise
     assert broken.failures == 1
@@ -277,8 +278,14 @@ def test_the_loop_trains_on_bucketed_batches_and_pushes_checkpoints(tmp_path, we
     result = train_sft(2, model, opt, loader, None, 2, cfg=cfg)
     assert result["step"] == expected and result["skipped"] == 0
     assert list((tmp_path / "out").glob("final_*.pt"))
-    pushed = [u[0] for u in api.uploads]
-    assert pushed[-2:] == ["final", "last"] and "last" in pushed[:-2]
+    folders = [u for u in api.uploads if u[0] != "summary"]
+    pushed = [u[0] for u in folders]
+    assert pushed[-1] == f"final_{expected:07d}" and len(set(pushed)) == len(pushed)     # every save kept
+    assert all(p.startswith("step_") for p in pushed[:-1]) and len(pushed) >= 2
+    assert {"metrics.json", "report.md", "loss.png", "trainable.safetensors"} <= set(folders[0][1])  # the report rides along
+    assert any(u[0] == "summary" for u in api.uploads)                                    # and the comparison
+    reports = tmp_path / "out" / "reports"
+    assert (reports / pushed[0] / "report.md").exists() and (reports / "index.md").exists()
 
 
 def test_max_steps_stops_early_and_still_writes_the_final_checkpoint(tmp_path):
@@ -326,3 +333,98 @@ def test_validation_loss_weights_every_target_token_equally():
     batches = [{"labels": torch.tensor([[0, 5]])}, {"labels": torch.tensor([[0, 5], [0, 5], [0, 5]])}]
     value = evaluate(Fixed(), batches, torch.device("cpu"), torch.float32)
     assert value == pytest.approx((1.0 * 1 + 3.0 * 3) / 4)          # not the plain mean of the two batch losses (2.0)
+
+
+def test_prefix_keep_last_and_state_choose_the_folder_names_and_files(tmp_path):
+    ckpt = tmp_path / "s.pt"
+    ckpt.write_bytes(b"x")
+    api = FakeApi()
+    rl = HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "a", prefix="rl_", keep_last=True)
+    rl.push(7, _state(), ckpt)
+    rl.push(9, _state(), ckpt, final=True)
+    assert [u[0] for u in api.uploads] == ["rl_step_0000007", "rl_last", "rl_final_0000009", "rl_last"]
+    assert "training_state.pt" in api.uploads[0][1]
+    light = FakeApi()
+    HubPusher("me/ocr", every_save=True, api=light, stage_dir=tmp_path / "b", state=False).push(3, _state(), ckpt)
+    assert "training_state.pt" not in light.uploads[0][1] and "trainable.safetensors" in light.uploads[0][1]
+
+
+def test_a_lora_folder_always_carries_the_slim_adapter_state_even_without_the_optimizer(tmp_path):
+    full = tmp_path / "full.pt"
+    torch.save({"model": _state(), "optimizer": {"big": 1}, "scheduler": {"s": 1}, "lora": True, "step": 3,
+                "lora_config": {"r": 2, "alpha": 4}, "lineage": [], "extra": {"epoch": 1}}, full)
+    api = FakeApi()
+    HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "s", state=False).push(3, _state(), full)
+    files = api.uploads[0][1]
+    assert "adapter_state.pt" in files and "training_state.pt" not in files
+    slim = tmp_path / "slim.pt"                  # the staged folder is cleaned after the upload: check the writer itself
+    HubPusher._write_adapter_state(full, slim)
+    data = torch.load(slim, weights_only=False)
+    assert "optimizer" not in data and "scheduler" not in data and data["lora_config"] == {"r": 2, "alpha": 4}
+    plain = tmp_path / "plain.pt"
+    torch.save({"model": _state(), "lora": False}, plain)
+    HubPusher._write_adapter_state(plain, tmp_path / "none.pt")
+    assert not (tmp_path / "none.pt").exists()                                  # a full fine-tune gets none
+
+
+def test_the_report_goes_into_the_folder_and_the_comparison_into_summary(tmp_path):
+    from train.ckpt_report import build_checkpoint_report, write_index
+    history = {"train/loss": [(s, 1.0 / s) for s in range(1, 30)], "val/loss": [(10, 0.5), (20, 0.4)]}
+    reports = tmp_path / "reports"
+    report = build_checkpoint_report(history, 20, reports / "sft_step_0000020", kind="sft")
+    write_index(reports)
+    api = FakeApi()
+    HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "s", prefix="sft").push(
+        20, _state(), None, report_dir=report)
+    names = {u[0]: u[1] for u in api.uploads}
+    assert set(names) == {"sft_step_0000020", "sft_summary"}
+    assert {"metrics.json", "report.md", "loss.png", "trainable.safetensors"} <= set(names["sft_step_0000020"])
+    assert set(names["sft_summary"]) == {"index.md", "checkpoints.csv", "compare.png"}
+
+
+def test_push_folder_uploads_a_trl_style_folder_with_the_report(tmp_path):
+    source = tmp_path / "checkpoint-30"
+    source.mkdir()
+    for name in ("adapter_model.safetensors", "adapter_config.json", "optimizer.pt", "trainer_state.json"):
+        (source / name).write_bytes(b"x")
+    report = tmp_path / "reports" / "rl_step_0000030"
+    report.mkdir(parents=True)
+    (report / "report.md").write_text("r")
+    api = FakeApi()
+    HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "a", prefix="rl", state=False).push_folder(
+        30, source, report_dir=report)
+    files = api.uploads[0][1]
+    assert api.uploads[0][0] == "rl_step_0000030"
+    assert {"adapter_model.safetensors", "adapter_config.json", "report.md", "run_config.json"} <= set(files)
+    assert "optimizer.pt" not in files and "trainer_state.json" not in files          # state=False drops them
+
+
+def test_every_checkpoint_is_validated_reported_and_named_with_the_prefix(tmp_path):
+    """Validation runs at each save step (so each report has numbers from that very step), once per step, and the prefix
+    reaches the checkpoint file, its report folder and the hub folder."""
+    import json
+    root = _docs(tmp_path)
+    loader = _loader(root, batch_tokens=400, max_batch_size=4)
+    val_loader = make_loader(root, "val", DatasetProcessor(preset="structured"), transform=_transform(),
+                             batch_tokens=400, max_batch_size=4)
+    api = FakeApi()
+    hub = HubPusher("me/ocr", every_save=True, api=api, stage_dir=tmp_path / "stage", prefix="sft")
+    model = StubModel()
+    cfg = SFTConfig(epochs=2, grad_accum=2, precision="fp32", log_every=1, save_every_steps=2, tensorboard=False,
+                    out_dir=str(tmp_path / "o"), val_loader=val_loader, eval_every=0, hub=hub, kind="sft",
+                    state_prefix="sft", run_config={"lr": 0.01, "hub_token": "x"},
+                    batch_adapter=lambda b: {k: b[k] for k in ("input_ids", "attention_mask", "labels")})
+    result = train_sft(2, model, torch.optim.SGD(model.parameters(), lr=0.01), loader, None, 2, cfg=cfg)
+    out = tmp_path / "o"
+    saves = sorted(p.stem for p in out.glob("sft_step_*.pt"))
+    assert saves and (out / f"sft_final_{result['step']:07d}.pt").exists()
+    history = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
+    val_steps = [r["step"] for r in history if r["name"] == "val/loss"]
+    assert len(val_steps) == len(set(val_steps))                                  # never twice for one step
+    for stem in saves:
+        step = int(stem.rsplit("_", 1)[1])
+        assert step in val_steps                                                  # measured at the checkpoint's own step
+        report = json.loads((out / "reports" / stem / "metrics.json").read_text())
+        assert report["highlights"]["val_loss_measured_at"] == step and "hub_token" not in report["run"]
+    assert (out / "reports" / "index.md").exists()
+    assert {u[0] for u in api.uploads if u[0] != "sft_summary"} == set(saves) | {f"sft_final_{result['step']:07d}"}

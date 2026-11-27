@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,9 @@ from PIL import Image
 from corpus.progress import Progress
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, RandomSampler, Sampler, SequentialSampler
 
+from .degrade import degraded_size, plan_example, render, upright_turn
+from .gen_eval import schema_from_prompt
+from .rl_prompts import build_prompt, sample_spec, wrap_answer, wrap_schema
 from .processors import BaseCollator, BaseTransform, DatasetProcessor, NoFittingExample, SequenceTooLong
 
 log = logging.getLogger("train.data")
@@ -48,7 +52,10 @@ class DocumentDataset(Dataset):
             samples_per_document: int = 1,
             seed: int = 0,
             redraw_each_epoch: bool | None = None,
-            fits=None
+            fits=None,
+            augment: str = "off",
+            augment_p: float = 0.0,
+            extended_p: float = 0.0,
         ):
         """fits(page_sizes, prompt, label) -> bool: when given (make_loader passes the transform's), a drawn
         example that would not fit the length limit is never returned. Another task / format is drawn for
@@ -63,6 +70,9 @@ class DocumentDataset(Dataset):
         self.epoch = 0
         self.redraw = (split == "train") if redraw_each_epoch is None else redraw_each_epoch
         self.fits = fits
+        self.augment, self.augment_p = augment, augment_p     # synthetic degradation (train/degrade.py); off by default
+        self.extended_p = extended_p                          # share of schema extractions in the extended format
+        self._draw_key: tuple[int, int] = (0, 0)
         self.dropped_examples = 0
         self.skipped_documents = 0
         self._sizes: dict[str, tuple[int, int]] = {}
@@ -88,8 +98,22 @@ class DocumentDataset(Dataset):
         example = self._draw(epoch if self.redraw else 0, index)
         prompt = next(part["text"] for part in reversed(example["messages"][0]["content"]) if part["type"] == "text")
         images = [self._open(rel) for rel in example["images"]] if self.load_images else example["images"]
-        return {"id": example["id"], "task": example["task"], "prompt": prompt, "images": images,
+        plan = self._plan(example, epoch if self.redraw else 0, index)
+        if plan is not None and self.load_images:
+            images = [render(image, info) for image, info in zip(images, plan)]
+        item = {"id": example["id"], "task": example["task"], "prompt": prompt, "images": images,
                 "label": example["messages"][-1]["content"], "image_paths": list(example["images"])}
+        if plan is not None:                              # only when degraded: an item without it is unchanged
+            item["augment"] = plan
+        return item
+
+    def _plan(self, example: dict, epoch: int, index: int) -> list[dict] | None:
+        """The degradation of this example's pages, or None. Seeded by the example itself, so `__getitem__`,
+        `length_of` and `_accept` all see the same plan without decoding anything."""
+        if self.augment == "off" or self.augment_p <= 0:
+            return None
+        rng = random.Random(f"{self.seed}:{epoch}:{index}:{example['id']}:augment")
+        return plan_example(rng, self.augment, len(example["images"]), self.augment_p)
 
     def length_of(self, epoch: int, index: int, token_length: Callable[[list, str, str], int]) -> int:
         """Token length of what `__getitem__((epoch, index))` returns, without decoding any image: the same
@@ -98,35 +122,72 @@ class DocumentDataset(Dataset):
         counters = self.dropped_examples, self.skipped_documents
         try:
             example = self._draw(epoch if self.redraw else 0, index)
-            sizes = []
-            for rel in example["images"]:
-                if rel not in self._sizes:
-                    with Image.open(self.root / rel) as image:
-                        self._sizes[rel] = image.size
-                sizes.append(self._sizes[rel])
+            sizes = self._page_sizes(example, epoch if self.redraw else 0, index)
             prompt = next(p["text"] for p in reversed(example["messages"][0]["content"]) if p["type"] == "text")
             return int(token_length(sizes, prompt, example["messages"][-1]["content"]))
         finally:
             self.dropped_examples, self.skipped_documents = counters
 
-    def _draw(self, epoch: int, index: int) -> dict:
-        for attempt in range(len(self.records)):
-            record = self.records[(index + attempt) % len(self.records)]
-            try:
-                return self.processor.sample(record, epoch=epoch, index=index, seed=self.seed,
-                                             accept=self._accept if self.fits else None)
-            except NoFittingExample:
-                self.skipped_documents += 1
-        raise RuntimeError("No example of any document is usable: none fits the length limit (raise max_length "
-                           "or lower the image resolution) or no enabled task applies to them.")
-
-    def _accept(self, example: dict) -> bool:
+    def _page_sizes(self, example: dict, epoch: int, index: int) -> list[tuple[int, int]]:
+        """Page sizes the transform will see: from the image headers, after the planned rotation if any."""
         sizes = []
         for rel in example["images"]:
             if rel not in self._sizes:
                 with Image.open(self.root / rel) as image:      # reads the header only, no decoding
                     self._sizes[rel] = image.size
             sizes.append(self._sizes[rel])
+        plan = self._plan(example, epoch, index)
+        return sizes if plan is None else [degraded_size(w, h, info) for (w, h), info in zip(sizes, plan)]
+
+    def _extend(self, example: dict, epoch: int, index: int) -> dict:
+        """Some schema extractions are rewritten into the extended format (a confidence per field, optionally a
+        reason and the page rotation, with varied key names), so the model learns that the schema in the prompt says
+        what shape the answer takes. The labels stay true: values are the reference, confidence is sure on a value and
+        low on a null, the reason is `none`, the rotation is the turn the degradation applied. Everything else is
+        returned untouched."""
+        if self.extended_p <= 0 or example["task"] != "extract_to_schema":
+            return example
+        rng = random.Random(f"{self.seed}:{epoch}:{index}:{example['id']}:extended")
+        spec = sample_spec(rng, self.extended_p)
+        if spec is None:
+            return example
+        parts = example["messages"][0]["content"]
+        text_at = max(i for i, part in enumerate(parts) if part["type"] == "text")
+        schema = schema_from_prompt(parts[text_at]["text"])
+        try:
+            plain = json.loads(example["messages"][-1]["content"])
+        except ValueError:
+            return example
+        if schema is None or not isinstance(plain, dict):
+            return example
+        pages = len(example["images"])
+        if spec.rotation_key and pages != 1:                  # one rotation cannot describe several pages
+            spec = replace(spec, rotation_key=None)
+        plan = self._plan(example, epoch, index)
+        upright = upright_turn(plan[0]) if plan is not None and pages == 1 else 0.0
+        wrapped = wrap_schema(schema, spec)
+        messages = [dict(m) for m in example["messages"]]
+        messages[0] = dict(messages[0], content=[dict(p) for p in parts])
+        messages[0]["content"][text_at]["text"] = build_prompt(parts[text_at]["text"], wrapped, spec)
+        messages[-1] = dict(messages[-1], content=wrap_answer(plain, schema, spec, upright=upright))
+        return dict(example, messages=messages)
+
+    def _draw(self, epoch: int, index: int) -> dict:
+        self._draw_key = (epoch, index)
+        for attempt in range(len(self.records)):
+            record = self.records[(index + attempt) % len(self.records)]
+            try:
+                example = self.processor.sample(record, epoch=epoch, index=index, seed=self.seed,
+                                                accept=self._accept if self.fits else None)
+                return self._extend(example, epoch, index)
+            except NoFittingExample:
+                self.skipped_documents += 1
+        raise RuntimeError("No example of any document is usable: none fits the length limit (raise max_length "
+                           "or lower the image resolution) or no enabled task applies to them.")
+
+    def _accept(self, example: dict) -> bool:
+        example = self._extend(example, *self._draw_key)      # the length that counts is the extended one
+        sizes = self._page_sizes(example, *self._draw_key)
         prompt = next(p["text"] for p in reversed(example["messages"][0]["content"]) if p["type"] == "text")
         ok = self.fits(sizes, prompt, example["messages"][-1]["content"])
         self.dropped_examples += 0 if ok else 1
