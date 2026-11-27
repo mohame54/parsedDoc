@@ -1,0 +1,104 @@
+# A100 80GB (one GPU), 10 epochs of SFT: LoRA r64/alpha128 + vision tower, bf16, gradient checkpointing, 8k-token samples.
+# Run: python -m train.train --config config/train_a100.yaml   (add --max-steps 3 first as a memory probe)
+# Derived from config/train.yaml; the other comments there still apply.
+
+# Default training run: LoRA on the language model, bf16, length-bucketed batches, warmup + cosine decay.
+#   uv run --extra train python -m train.train --config config/train.yaml
+# Precedence: built-in defaults < this file (and any `extends`) < command-line flags, so
+#   ... --config config/train.yaml --epochs 3 --batch-tokens 4800
+# changes only those two settings. Variants next to this file: train_probe.yaml (memory test),
+# train_qlora.yaml (4-bit base), train_full.yaml (no LoRA, FSDP2).
+#
+# Where the numbers come from (starting points, not tuned on your data; check the val loss):
+#  - LoRA on every attention and MLP projection, rank 16 / alpha 32, dropout 0.05: the usual recipe, also used by
+#    community DeepSeek-OCR fine-tunes (rank 16). "LoRA Without Regret" (thinkingmachines.ai/blog/lora) finds that
+#    adapting all weight matrices matters more than a high rank, and that the best LoRA learning rate is about
+#    10x the full fine-tuning one (here 1e-4 against 1e-5 in train_full.yaml).
+#  - AdamW, not Muon, for adapters: LoRA's A and B are 2D matrices, so Muon would pick them up, and Muon is not
+#    validated for adapters. Muon stays available for full fine-tuning (see train_full.yaml).
+#  - About 12 samples per optimizer step (grad_accum 6 x ~2 samples of a 3200-token batch, measured on the pilot
+#    export), 5% warmup, cosine decay to 10% of the peak, gradient clipping at 1.0, 2 epochs x 4 draws per document
+#    (every draw is a different task or format, so a document is seen 8 times in 8 different ways).
+
+model:
+  id: deepseek-community/DeepSeek-OCR-2   # the transformers-native checkpoint; deepseek-ai/DeepSeek-OCR-2 is the
+                                           # original custom-code one and does not load into the native class
+  ocr_mode: base               # image resolution: small | base | gundam (v2); tiny | large exist for v1
+  train_vision: true           # vision tower + projector train too (weights load in fp32; bf16 compute)
+  quant: null                  # 4bit | 8bit for QLoRA (single or ddp only)
+
+lora:
+  enabled: true
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules: null         # null = the language model's attention and MLP projections; or a regex / list of names
+
+data:
+  root: data/export/clean      # the cleaned export (python -m labeller.clean <unverified> <clean>)
+  # preset: structured         # task mix, see train/processors/mixture.py; unset = visual with train_vision, else structured
+  descriptions: null           # JSON from `labeller describe-collect`; null = template descriptions
+  max_length: 8192             # longest sample in tokens, image included; longer ones are left out
+  merge_pages: null            # vertical | horizontal | grid; null = the model's default
+  workers: 2
+  samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
+  max_documents: null          # use only the first N documents (null = all); handy for an overfit test
+  val_max_documents: 64        # validate on the first N documents of val.jsonl (null = all); each pass costs time
+  augment: "soft"              # soft | strong: how hard a degraded training page is hit (validation is never degraded)
+  augment_p: 0.2               # share of training examples that get degraded (0.2 = a fifth); 0 = off
+  extended_p: 0.3              # share of schema extractions in the extended format (confidence, reason, rotation)
+
+batching:
+  batch_tokens: 8192          # padded tokens per micro-batch; with grad_checkpointing this is ~20-30 GB on an 80 GB card, so raise it after the probe
+  max_batch_size: 8            # most samples in one bucketed batch
+  pad_multiple: 64
+  batch_size: 2                # used only when batch_tokens is null
+  pad_to_max: false            # pad every sample to max_length (wasteful; not with batch_tokens)
+  loss_weighting: null         # token | batch; null = token when batch_tokens is set, else batch
+
+optimizer:
+  name: adamw                  # adamw | muon (Muon for 2D hidden matrices, AdamW for the rest)
+  lr: 5.0e-5                   # one lr for LoRA and the full vision weights: between the LoRA rate (1e-4) and the full fine-tune rate (2e-5)
+  weight_decay: 0.01
+  muon_lr: 1.0e-4              # only with name: muon; with match_rms_adamw it can equal lr
+  muon_adjust: match_rms_adamw # original | match_rms_adamw (AdamW-scale lr) | spectral_unclamped
+  max_grad_norm: 1.0
+  scheduler: cosine            # cosine | linear | constant
+  warmup_ratio: 0.05           # share of the steps spent warming up
+  min_lr_ratio: 0.1            # the curve ends at this fraction of the peak
+
+training:
+  strategy: single             # one A100 80GB, no torchrun needed
+  epochs: 10
+  grad_accum: 16               # samples per step = grad_accum x samples per micro-batch (about 4 at 16k tokens): check the log, aim for ~64
+  precision: bf16              # A100 supports bf16: no loss scaler, no fp16 overflow
+  compile: false               # varying batch shapes make it recompile; leave off with bucketing
+  max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
+  eval: true                   # validation loss (val/loss in TensorBoard): before training, every eval_every steps, each epoch
+  eval_every: 200              # steps between validations (0 = only at the end of each epoch)
+  gen_eval: true               # generation check: generate answers for validation examples and score them (slow)
+  gen_eval_every: 0            # also every N steps (0 = before the first step, with the base model, and at the end)
+  gen_eval_at_save: false      # off to save GPU minutes; validation loss still runs every eval_every steps
+  gen_samples_per_task: 2      # validation examples per task to generate
+  gen_max_new_tokens: 2048     # most tokens generated; examples with a longer reference are left out
+  gen_batch_size: 4
+  grad_checkpointing: true     # recompute activations in backward: 3-5x less activation memory for ~30% more compute
+  chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
+
+checkpoints:
+  out_dir: /checkpoints/sft    # the Modal checkpoint volume (change for a local run)
+  save_every: 100              # optimizer steps; 0 = only the final checkpoint
+  log_every: 10
+  tensorboard: true
+  resume: null                 # carry on THIS run: a .pt file, or hf://user/repo/step_0000200/training_state.pt
+  init_from: null              # start a NEW run from an earlier adapter: it is merged into the base, then the LoRA below is added
+  # init_lora_r: 16            # the old adapter's rank / alpha / targets, only for checkpoints that predate recording them
+  state_prefix: null           # before every checkpoint / report / hub folder name; null = sft (sft_step_0000200), "" = none
+  reports: true                # a metrics report with graphs (loss, val loss, generation scores) next to every checkpoint
+
+hub:
+  repo: Muhammed164/parsedDoc  # user/name to push checkpoints to; the token comes from HF_TOKEN (a Modal secret)
+  private: true
+  every_save: true             # push every periodic save into its own folder (step_0000200/, final_0000612/), not only the end
+  keep_last: false             # also keep a last/ copy of the newest save
+  state: false                 # no training_state.pt in the hub folders (fp32 vision weights + optimizer make them big); the volume keeps resumable ones

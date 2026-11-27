@@ -24,7 +24,7 @@ from . import distributed as dd
 from .config import check_choices, load_config
 from .hub import HubPusher, resolve_resume
 from .dataset import make_loader
-from .model import DeepSeekOCR
+from .model import DeepSeekOCR, parse_targets
 from .optim import build_optimizer, build_scheduler
 from .processors import DatasetProcessor, batch_adapter_for, create_transform, model_family
 log = logging.getLogger("train.sft")
@@ -62,6 +62,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--loss-weighting", choices=["token", "batch"], default=None,
                    help="token: every target token counts equally over the accumulation window; batch: mean of the "
                         "micro-batch losses. Default: token with --batch-tokens, else batch")
+    p.add_argument("--grad-checkpointing", action=argparse.BooleanOptionalAction, default=False,
+                   help="recompute activations in backward: 3-5x less activation memory, about 30%% more compute. "
+                        "Needed for long samples (--max-length 8192) with --train-vision on one 80 GB card")
     p.add_argument("--chunked-loss", action=argparse.BooleanOptionalAction, default=True,
                    help="compute the loss over the supervised positions only, in chunks, without the full logits "
                         "(a lot less memory on long batches; the same loss)")
@@ -83,8 +86,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=0, help="stop after this many optimizer steps (memory probes)")
     p.add_argument("--hub-repo", default=None, help="push checkpoints to this Hugging Face repo (user/name)")
     p.add_argument("--hub-token", default=None, help="Hugging Face token (default: HF_TOKEN or the cached login)")
-    p.add_argument("--hub-every-save", action="store_true",
-                   help="push at every periodic save (default: only the final checkpoint)")
+    p.add_argument("--hub-every-save", action=argparse.BooleanOptionalAction, default=True,
+                   help="push every periodic save, each into its own folder (--no-hub-every-save: only the final one)")
+    p.add_argument("--hub-keep-last", action="store_true",
+                   help="also keep a `last/` copy of the newest save in the repo (every save has its own folder anyway)")
+    p.add_argument("--hub-state", action=argparse.BooleanOptionalAction, default=True,
+                   help="put training_state.pt (optimizer etc.) in every hub folder; --no-hub-state makes the folders "
+                        "much smaller but they can no longer be resumed from")
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--grad-accum", type=int, default=8)
@@ -105,6 +113,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="use only the first N documents of the split (a quick overfit test)")
     p.add_argument("--samples-per-document", type=int, default=1,
                    help="examples drawn from each document per epoch (a different task / format each time)")
+    p.add_argument("--augment", choices=["off", "soft", "strong"], default="soft",
+                   help="how hard a degraded TRAINING page is hit (train/degrade.py): soft = small skew, noise, blur, "
+                        "JPEG; strong = quarter and free turns too. Validation is never degraded.")
+    p.add_argument("--augment-p", type=float, default=0.0,
+                   help="share of training examples that get degraded, 0-1 (0.2 = a fifth of them, the rest stay "
+                        "clean). 0 turns it off.")
+    p.add_argument("--extended-p", type=float, default=0.0,
+                   help="share of schema extractions written in the extended format (a confidence per field, "
+                        "optionally a reason and the page rotation, varied key names); the rest keep the plain schema")
     p.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto")
     p.add_argument("--train-vision", action=argparse.BooleanOptionalAction, default=False,
                    help="also train the vision tower and projector")
@@ -119,7 +136,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False,
                    help="torch.compile the language model (off by default: varying batch shapes make it recompile)")
     p.add_argument("--out-dir", default="checkpoints/sft")
-    p.add_argument("--resume", default=None, help="a checkpoint .pt, or hf://user/repo/last/training_state.pt")
+    p.add_argument("--resume", default=None,
+                   help="carry on THIS run: a checkpoint .pt, or hf://user/repo/step_0000200/training_state.pt (same "
+                        "LoRA configuration, optimizer and step restored)")
+    p.add_argument("--init-from", default=None,
+                   help="start a NEW run from an earlier adapter with a new LoRA configuration: the old adapter (and the "
+                        "ones it was built on) is loaded and merged into the base, then a fresh LoRA "
+                        "(--lora-r/--lora-alpha/--lora-targets) is attached. Optimizer and step start from zero. Needs "
+                        "--lora and an unquantized base. A .pt, or hf://user/repo/sft_step_0000200/adapter_state.pt")
+    p.add_argument("--init-lora-r", type=int, default=None,
+                   help="the rank of the --init-from adapter, only for checkpoints that predate recording it")
+    p.add_argument("--init-lora-alpha", type=int, default=None, help="its alpha (same: old checkpoints only)")
+    p.add_argument("--init-lora-targets", default=None, help="its target modules (same: old checkpoints only)")
+    p.add_argument("--state-prefix", default=None,
+                   help="put before every checkpoint, report and hub folder name, to tell runs apart (sft_step_0000200, "
+                        "rl_step_...). Default: the kind of training (sft); give '' for none")
+    p.add_argument("--reports", action=argparse.BooleanOptionalAction, default=True,
+                   help="write a metrics report with graphs next to every checkpoint (train/ckpt_report.py)")
+    p.add_argument("--gen-eval-at-save", action=argparse.BooleanOptionalAction, default=True,
+                   help="validate and generate at every checkpoint, so each report has numbers from its own step")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=200)
     p.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
@@ -138,6 +173,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             p.error(f"{flag} is required (on the command line or in the config file)")
     if isinstance(args.lora_targets, str) and args.lora_targets.lstrip().startswith("["):
         p.error("--lora-targets takes a regex or comma-separated names; give a list in the YAML file")
+    if args.init_from:
+        if args.resume:
+            p.error("--init-from starts a new run and --resume carries on an old one; give one of them")
+        if not args.lora:
+            p.error("--init-from attaches a new LoRA on top of the merged old adapter, so it needs --lora")
+        if args.quant:
+            p.error("--init-from merges the old adapter into the base, which a quantized (QLoRA) base cannot take")
     if args.preset is None:
         args.preset = "visual" if args.train_vision else "structured"
         log.info("task mix: the `%s` preset (%s)", args.preset,
@@ -147,9 +189,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _targets(value):
     """A regex string stays one; "q_proj,v_proj" or a YAML list becomes a list of module names."""
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [part.strip() for part in value.split(",")] if "," in value and "(" not in value else value
+    return parse_targets(value)
 
 
 def save_resolved(args: argparse.Namespace) -> None:
@@ -210,7 +250,11 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             transform=transform, batch_size=args.batch_size, num_workers=args.workers,
             batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
             samples_per_document=args.samples_per_document, max_documents=args.max_documents,
+            augment=args.augment, augment_p=args.augment_p, extended_p=args.extended_p,
         )
+        if args.augment != "off" and args.augment_p > 0:
+            log.info("synthetic degradation (%s) on %.0f%% of the training examples; validation stays clean",
+                     args.augment, 100 * args.augment_p)
         if args.batch_tokens:
             log.info("length-bucketed batches: up to %d padded tokens and %d samples per micro-batch, "
                      "samples longer than %s tokens are left out", args.batch_tokens, args.max_batch_size,
@@ -250,10 +294,26 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
         )
         model.chunked_loss = args.chunked_loss
         if args.lora:
-            log.info("adding LoRA adapters (r=%d, alpha=%d, dropout=%g)", args.lora_r, args.lora_alpha,
-                     args.lora_dropout)
             kwargs = {} if args.lora_targets is None else {"target_modules": _targets(args.lora_targets)}
-            model.add_lora(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout, **kwargs)
+            if args.init_from:
+                log.info("continuing from %s: merging its adapter chain into the base, then a new LoRA "
+                         "(r=%d, alpha=%d, dropout=%g)", args.init_from, args.lora_r, args.lora_alpha, args.lora_dropout)
+                meta = model.continue_from(
+                    args.init_from, r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout,
+                    old_r=args.init_lora_r, old_alpha=args.init_lora_alpha,
+                    old_target_modules=None if args.init_lora_targets is None else _targets(args.init_lora_targets),
+                    token=args.hub_token, **kwargs)
+                log.info("merged %d earlier adapter(s) (the last from step %s)", len(model.lineage), meta.get("step"))
+            else:
+                log.info("adding LoRA adapters (r=%d, alpha=%d, dropout=%g)", args.lora_r, args.lora_alpha,
+                         args.lora_dropout)
+                model.add_lora(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout, **kwargs)
+        if args.grad_checkpointing:
+            n_ckpt = model.enable_grad_checkpointing()
+            if not n_ckpt:
+                raise SystemExit("--grad-checkpointing: this model has no layer that supports it")
+            log.info("gradient checkpointing on (%d module(s)): less activation memory, about a third more compute",
+                     n_ckpt)
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         log.info("trainable parameters: %s of %s (%.2f%%)%s", f"{trainable:,}", f"{total:,}", 100 * trainable / total,
@@ -274,16 +334,20 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             return build_scheduler(opt, steps, args.scheduler, args.warmup_ratio, args.min_lr_ratio)
 
         loss_weighting = args.loss_weighting or ("token" if args.batch_tokens else "batch")
+        state_prefix = "sft" if args.state_prefix is None else args.state_prefix
         hub = None
         if args.hub_repo and dd.is_main():
             hub = HubPusher(args.hub_repo, token=args.hub_token, private=args.hub_private,
                             every_save=args.hub_every_save, run_config=vars(args),
-                            stage_dir=Path(args.out_dir) / "hub_stage")
+                            stage_dir=Path(args.out_dir) / "hub_stage", prefix=state_prefix,
+                            keep_last=args.hub_keep_last, state=args.hub_state)
         cfg = SFTConfig(
             epochs=args.epochs, grad_accum=args.grad_accum, max_grad_norm=args.max_grad_norm,
             precision=args.precision, log_every=args.log_every, save_every_steps=args.save_every,
             out_dir=args.out_dir, resume=resolve_resume(args.resume, args.hub_token), tensorboard=args.tensorboard,
             compile=args.compile, loss_weighting=loss_weighting, max_steps=args.max_steps, hub=hub,
+            kind="sft", state_prefix=state_prefix, reports=args.reports, gen_eval_at_save=args.gen_eval_at_save,
+            run_config={k: v for k, v in vars(args).items() if k != "hub_token"},
             batch_adapter=batch_adapter_for(args.model_id), val_loader=val_loader, eval_every=args.eval_every,
             gen_eval=gen_eval, gen_eval_every=args.gen_eval_every,
         )

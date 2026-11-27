@@ -154,3 +154,21 @@ def test_the_large_gpu_config_loads_and_keeps_both_training_settings():
     assert flat["precision"] == "bf16" and flat["batch_tokens"] == 16000 and flat["eval_every"] == 100
     assert flat["grad_accum"] == 1 and flat["val_max_documents"] is None and flat["workers"] == 4
     assert load_config("train")["eval"] is True and load_config("train_probe")["eval"] is False
+
+
+def test_init_from_starts_a_new_run_with_a_new_lora_and_conflicts_are_refused(capsys):
+    args = parse_args(BASE + ["--lora", "--lora-r", "8", "--init-from", "old.pt", "--init-lora-r", "16"])
+    assert args.init_from == "old.pt" and args.lora_r == 8 and args.init_lora_r == 16
+    for bad in (["--init-from", "old.pt"],                                   # no --lora
+                ["--lora", "--init-from", "old.pt", "--resume", "run.pt"],   # a new run and an old one
+                ["--lora", "--init-from", "old.pt", "--quant", "4bit"]):     # cannot merge into a quantized base
+        with pytest.raises(SystemExit):
+            parse_args(BASE + bad)
+    assert "--init-from" in capsys.readouterr().err
+
+
+def test_checkpoint_folder_defaults_keep_every_save_and_name_them_by_kind():
+    args = parse_args(BASE)
+    assert args.hub_every_save is True and args.hub_keep_last is False and args.hub_state is True
+    assert args.state_prefix is None and args.reports is True and args.gen_eval_at_save is True
+    assert parse_args(BASE + ["--state-prefix", "", "--no-hub-state", "--hub-keep-last"]).state_prefix == ""

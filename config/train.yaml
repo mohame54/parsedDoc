@@ -40,6 +40,9 @@ data:
   samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
   max_documents: null          # use only the first N documents (null = all); handy for an overfit test
   val_max_documents: 64        # validate on the first N documents of val.jsonl (null = all); each pass costs time
+  augment: "soft"              # soft | strong: how hard a degraded training page is hit (validation is never degraded)
+  augment_p: 0.2               # share of training examples that get degraded (0.2 = a fifth); 0 = off
+  extended_p: 0.3              # share of schema extractions in the extended format (confidence, reason, rotation)
 
 batching:
   batch_tokens: 3200           # padded tokens per micro-batch (bucketed); set it from the memory probe, null = fixed batch_size
@@ -71,9 +74,11 @@ training:
   eval_every: 200              # steps between validations (0 = only at the end of each epoch)
   gen_eval: true               # generation check: generate answers for validation examples and score them (slow)
   gen_eval_every: 0            # also every N steps (0 = before the first step, with the base model, and at the end)
+  gen_eval_at_save: true       # validate and generate at every checkpoint too, so each report has numbers from its own step
   gen_samples_per_task: 2      # validation examples per task to generate
   gen_max_new_tokens: 2048     # most tokens generated; examples with a longer reference are left out
   gen_batch_size: 4
+  grad_checkpointing: false    # recompute activations in backward: 3-5x less activation memory for ~30% more compute
   chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
 
 checkpoints:
@@ -81,9 +86,15 @@ checkpoints:
   save_every: 100              # optimizer steps; 0 = only the final checkpoint
   log_every: 10
   tensorboard: true
-  resume: null                 # a .pt file, or hf://user/repo/last/training_state.pt
+  resume: null                 # carry on THIS run: a .pt file, or hf://user/repo/step_0000200/training_state.pt
+  init_from: null              # start a NEW run from an earlier adapter: it is merged into the base, then the LoRA below is added
+  # init_lora_r: 16            # the old adapter's rank / alpha / targets, only for checkpoints that predate recording them
+  state_prefix: null           # before every checkpoint / report / hub folder name; null = sft (sft_step_0000200), "" = none
+  reports: true                # a metrics report with graphs (loss, val loss, generation scores) next to every checkpoint
 
 hub:
   repo: null                   # user/name to push checkpoints to; the token comes from HF_TOKEN
   private: true
-  every_save: false            # true = also push at every periodic save, not only at the end
+  every_save: true             # push every periodic save into its own folder (step_0000200/, final_0000612/), not only the end
+  keep_last: false             # also keep a last/ copy of the newest save
+  state: true                  # include training_state.pt (optimizer) in each folder; false = much smaller, but no resume from them
