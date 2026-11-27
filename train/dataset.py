@@ -48,6 +48,7 @@ class DocumentDataset(Dataset):
             processor: DatasetProcessor | None = None,
             load_images: bool = True,
             languages: set[str] | None = None,
+            exclude_languages: set[str] | None = None,
             max_documents: int | None = None,
             samples_per_document: int = 1,
             seed: int = 0,
@@ -84,6 +85,9 @@ class DocumentDataset(Dataset):
             self.records = [json.loads(line) for line in handle if line.strip()]
         if languages:
             self.records = [r for r in self.records if r.get("language") in languages]
+        if exclude_languages:
+            skip = {code.lower() for code in exclude_languages}
+            self.records = [r for r in self.records if str(r.get("language") or "").lower() not in skip]
         if max_documents is not None:
             self.records = self.records[:max_documents]
 
@@ -256,6 +260,15 @@ class EpochSampler(Sampler):
         return len(self.base)
 
 
+_PLAN_JOB = None      # (sampler, epoch) inherited by forked planning workers
+
+
+def _plan_chunk(bounds: tuple[int, int]) -> list[int]:
+    sampler, epoch = _PLAN_JOB
+    return [sampler._padded(sampler.dataset.length_of(epoch, i, sampler.token_length))
+            for i in range(*bounds)]
+
+
 class LengthBucketBatchSampler:
     """Batches of similar-length examples, sized by a token budget instead of a count.
 
@@ -301,11 +314,35 @@ class LengthBucketBatchSampler:
         self._plan, self._info = self._build(epoch)
         self._plan_epoch = epoch
 
+    def _lengths(self, epoch: int, n: int) -> list[int]:
+        """Padded length of every example of the epoch. With several CPUs (and fork) the work is split over
+        processes: planning is CPU-bound (drawing, templating, tokenising) and otherwise idles the GPU."""
+        import multiprocessing as mp
+        import os
+
+        workers = min(int(os.environ.get("PLAN_WORKERS", os.cpu_count() or 1)), 16)
+        global _PLAN_JOB
+        if workers > 1 and n >= 256 and "fork" in mp.get_all_start_methods():
+            _PLAN_JOB = (self, epoch)
+            step = max(32, -(-n // (workers * 8)))
+            chunks = [(a, min(a + step, n)) for a in range(0, n, step)]
+            try:
+                with mp.get_context("fork").Pool(workers) as pool:
+                    out: list[int] = []
+                    for part in Progress(pool.imap(_plan_chunk, chunks), total=len(chunks),
+                                         desc=f"planning epoch {epoch} batches ({workers} procs)", unit="chunk",
+                                         leave=False, disable=self.rank != 0):
+                        out.extend(part)
+                return out
+            finally:
+                _PLAN_JOB = None
+        return [self._padded(self.dataset.length_of(epoch, i, self.token_length))
+                for i in Progress(range(n), desc=f"planning epoch {epoch} batches", unit="example", leave=False,
+                                  disable=self.rank != 0)]
+
     def _build(self, epoch: int) -> tuple[list[list[int]], dict]:
         n = len(self.dataset)
-        lengths = [self._padded(self.dataset.length_of(epoch, i, self.token_length))
-                   for i in Progress(range(n), desc=f"planning epoch {epoch} batches", unit="example", leave=False,
-                                  disable=self.rank != 0)]
+        lengths = self._lengths(epoch, n)
         too_long = [i for i, length in enumerate(lengths) if length > self.batch_tokens]
         if too_long:
             raise ValueError(f"{len(too_long)} example(s) are longer than batch_tokens={self.batch_tokens} "

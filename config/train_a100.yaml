@@ -41,7 +41,8 @@ data:
   max_length: 8192             # longest sample in tokens, image included; longer ones are left out
   merge_pages: null            # vertical | horizontal | grid; null = the model's default
   workers: 2
-  samples_per_document: 4      # examples drawn per document per epoch, a different task / format each time
+  samples_per_document: 12      # examples drawn per document per epoch, a different task / format each time
+  exclude_languages: [de]      # ISO codes left out of training, validation and the generation check (null = keep all)
   max_documents: null          # use only the first N documents (null = all); handy for an overfit test
   val_max_documents: 64        # validate on the first N documents of val.jsonl (null = all); each pass costs time
   augment: "soft"              # soft | strong: how hard a degraded training page is hit (validation is never degraded)

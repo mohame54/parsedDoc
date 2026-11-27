@@ -40,7 +40,7 @@ SECTIONS: dict[str, dict[str, str]] = {
     "data": {"root": "root", "preset": "preset", "descriptions": "descriptions", "max_length": "max_length",
              "merge_pages": "merge_pages", "workers": "workers",
              "samples_per_document": "samples_per_document", "max_documents": "max_documents",
-             "val_max_documents": "val_max_documents", "augment": "augment", "augment_p": "augment_p",
+             "val_max_documents": "val_max_documents", "exclude_languages": "exclude_languages", "augment": "augment", "augment_p": "augment_p",
              "extended_p": "extended_p"},
     "batching": {"batch_size": "batch_size", "batch_tokens": "batch_tokens", "max_batch_size": "max_batch_size",
                  "pad_multiple": "pad_multiple", "pad_to_max": "pad_to_max", "loss_weighting": "loss_weighting"},

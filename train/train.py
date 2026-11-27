@@ -109,6 +109,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="learning-rate curve after the warmup")
     p.add_argument("--warmup-ratio", type=float, default=0.05, help="share of the steps spent warming up linearly")
     p.add_argument("--min-lr-ratio", type=float, default=0.1, help="the curve ends at this fraction of the base lr")
+    p.add_argument("--exclude-languages", nargs="*", default=None, metavar="CODE",
+                   help="leave documents of these languages out of training and validation (ISO 639-1, e.g. de)")
     p.add_argument("--max-documents", type=int, default=None,
                    help="use only the first N documents of the split (a quick overfit test)")
     p.add_argument("--samples-per-document", type=int, default=1,
@@ -249,7 +251,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             args.root, split="train", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
             transform=transform, batch_size=args.batch_size, num_workers=args.workers,
             batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
-            samples_per_document=args.samples_per_document, max_documents=args.max_documents,
+            samples_per_document=args.samples_per_document, max_documents=args.max_documents, exclude_languages=args.exclude_languages,
             augment=args.augment, augment_p=args.augment_p, extended_p=args.extended_p,
         )
         if args.augment != "off" and args.augment_p > 0:
@@ -266,7 +268,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
                 args.root, split="val", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
                 transform=transform, batch_size=args.batch_size, num_workers=args.workers,
                 batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
-                max_documents=args.val_max_documents,
+                max_documents=args.val_max_documents, exclude_languages=args.exclude_languages,
             )
             log.info("validation: %d batches from %s/val.jsonl, loss logged as val/loss", len(val_loader), args.root)
         elif args.eval:
@@ -279,7 +281,8 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
                 args.root, transform, batch_adapter_for(args.model_id), samples_per_task=args.gen_samples_per_task,
                 preset=args.preset,
                 max_new_tokens=args.gen_max_new_tokens, batch_size=args.gen_batch_size,
-                max_documents=args.val_max_documents, precision=args.precision, out_dir=Path(args.out_dir) / "generations")
+                max_documents=args.val_max_documents, precision=args.precision, out_dir=Path(args.out_dir) / "generations",
+                exclude_languages=args.exclude_languages)
 
         log.info("loading the model %s (the first run downloads its weights)", args.model_id)
         load_dtype = weights_dtype(args, dtype)

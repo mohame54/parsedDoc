@@ -462,7 +462,8 @@ class GenerationEvaluator:
     def __init__(self, root: str | Path, transform, adapter: Callable[[dict], dict] | None, processor=None,
                  split: str = "val", samples_per_task: int = 2, max_new_tokens: int = 2048, batch_size: int = 4,
                  max_documents: int | None = None, precision: str = "auto", out_dir: str | Path | None = None,
-                 draws_per_document: int = 6, preset: str = "structured"):
+                 draws_per_document: int = 6, preset: str = "structured",
+                 exclude_languages: list[str] | None = None):
         from .dataset import DocumentDataset
         from .processors import DatasetProcessor
 
@@ -471,7 +472,7 @@ class GenerationEvaluator:
         self.out_dir = Path(out_dir) if out_dir else None
         dataset = DocumentDataset(root, split, processor or DatasetProcessor(preset=preset),
                                   samples_per_document=draws_per_document, max_documents=max_documents,
-                                  fits=transform.fits)
+                                  fits=transform.fits, exclude_languages=exclude_languages)
         taken: dict[str, int] = defaultdict(int)
         self.skipped_long = 0
         self.items: list[dict] = []
