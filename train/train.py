@@ -232,6 +232,9 @@ def build_transform(args: argparse.Namespace):
 def main(argv: list[str] | None = None) -> dict[str, int] | None:
     args = parse_args(argv)
     configure(args)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True        # the fp32 parts (vision weights, optimizer maths) use tensor cores
+        torch.backends.cudnn.allow_tf32 = True
     if args.config:
         log.info("settings from %s, then the command line", args.config)
     if dd.is_main():
@@ -250,6 +253,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
         loader = make_loader(
             args.root, split="train", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
             transform=transform, batch_size=args.batch_size, num_workers=args.workers,
+            pin_memory=torch.cuda.is_available(), persistent_workers=True,
             batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
             samples_per_document=args.samples_per_document, max_documents=args.max_documents, exclude_languages=args.exclude_languages,
             augment=args.augment, augment_p=args.augment_p, extended_p=args.extended_p,
@@ -267,6 +271,7 @@ def main(argv: list[str] | None = None) -> dict[str, int] | None:
             val_loader = make_loader(
                 args.root, split="val", processor=DatasetProcessor(preset=args.preset, descriptions=args.descriptions),
                 transform=transform, batch_size=args.batch_size, num_workers=args.workers,
+            pin_memory=torch.cuda.is_available(), persistent_workers=True,
                 batch_tokens=args.batch_tokens, max_batch_size=args.max_batch_size, pad_multiple=args.pad_multiple,
                 max_documents=args.val_max_documents, exclude_languages=args.exclude_languages,
             )

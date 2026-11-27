@@ -31,8 +31,8 @@ model:
 
 lora:
   enabled: true
-  r: 64
-  alpha: 128
+  r: 128
+  alpha: 256
   dropout: 0.05
   target_modules: null         # null = the language model's attention and MLP projections; or a regex / list of names
 
@@ -42,7 +42,7 @@ data:
   descriptions: null           # JSON from `labeller describe-collect`; null = template descriptions
   max_length: 8192             # longest sample in tokens, image included; longer ones are left out
   merge_pages: null            # vertical | horizontal | grid; null = the model's default
-  workers: 2
+  workers: 6                   # the container has 8 CPUs: image decoding + degradation was starving the GPU (2 workers: 2.7k-4.7k tokens/s, uneven)
   samples_per_document: 16     # draws per document per epoch (task and format re-drawn each time; 16 tasks exist)
   exclude_languages: [de]      # ISO codes left out of training, validation and the generation check (null = keep all)
   max_documents: null          # use only the first N documents (null = all); handy for an overfit test
@@ -52,8 +52,8 @@ data:
   extended_p: 0.3              # share of schema extractions in the extended format (confidence, reason, rotation)
 
 batching:
-  batch_tokens: 8192          # padded tokens per micro-batch; with grad_checkpointing this is ~20-30 GB on an 80 GB card, so raise it after the probe
-  max_batch_size: 8            # most samples in one bucketed batch
+  batch_tokens: 12288         # padded tokens per micro-batch; with grad_checkpointing this is ~20-30 GB on an 80 GB card, so raise it after the probe
+  max_batch_size: 16           # most samples in one bucketed batch
   pad_multiple: 64
   batch_size: 2                # used only when batch_tokens is null
   pad_to_max: false            # pad every sample to max_length (wasteful; not with batch_tokens)
@@ -73,7 +73,7 @@ optimizer:
 training:
   strategy: single             # one A100 80GB, no torchrun needed
   epochs: 3                    # 3 x 16 = 48 draws per document; raise it only if the probe's projected cost allows
-  grad_accum: 16               # samples per step = grad_accum x samples per micro-batch (about 4 at 16k tokens): check the log, aim for ~64
+  grad_accum: 8                # samples per step = grad_accum x samples per micro-batch (about 4 at 16k tokens): check the log, aim for ~64
   precision: bf16              # A100 supports bf16: no loss scaler, no fp16 overflow
   compile: false               # varying batch shapes make it recompile; leave off with bucketing
   max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
@@ -85,7 +85,7 @@ training:
   gen_samples_per_task: 2      # validation examples per task to generate
   gen_max_new_tokens: 2048     # most tokens generated; examples with a longer reference are left out
   gen_batch_size: 4
-  grad_checkpointing: true     # recompute activations in backward: 3-5x less activation memory for ~30% more compute
+  grad_checkpointing: false    # the probe peaked at 31 GB without it on the 80 GB card, and it runs ~1.8x faster; turn on if you raise batch_tokens a lot
   chunked_loss: true           # loss over the supervised positions only, in chunks: far less memory on long batches
 
 checkpoints:

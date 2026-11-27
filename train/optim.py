@@ -118,7 +118,8 @@ def build_optimizer(
         muon_params, adamw_params = [], muon_params + adamw_params
     muon = (Muon(muon_params, lr=muon_lr, weight_decay=weight_decay, momentum=muon_momentum,
                  ns_steps=ns_steps, adjust_lr_fn=adjust_lr_fn) if muon_params else None)
-    adamw = (AdamW(adamw_params, lr=adamw_lr, weight_decay=weight_decay, betas=betas, eps=eps)
+    fused = bool(adamw_params) and all(q.is_cuda for q in adamw_params)      # one kernel for the whole update
+    adamw = (AdamW(adamw_params, lr=adamw_lr, weight_decay=weight_decay, betas=betas, eps=eps, fused=fused or None)
              if adamw_params else None)
     return MuonAdamW(muon, adamw)
 
