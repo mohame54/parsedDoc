@@ -80,7 +80,7 @@ training:
   eval: true                   # validation loss (val/loss in TensorBoard): before training, every eval_every steps, each epoch
   eval_every: 200              # steps between validations (0 = only at the end of each epoch)
   gen_eval: true               # generation check: generate answers for validation examples and score them (slow)
-  gen_eval_every: 0            # also every N steps (0 = before the first step, with the base model, and at the end)
+  gen_eval_every: 200          # also every 200 steps (0 = only before the first step, with the base model, and at the end)
   gen_eval_at_save: false      # off to save GPU minutes; validation loss still runs every eval_every steps
   gen_samples_per_task: 2      # validation examples per task to generate
   gen_max_new_tokens: 2048     # most tokens generated; examples with a longer reference are left out

@@ -12,3 +12,4 @@ data/
 # Modal deployment script (local only)
 modal_app.py
 tests/test_modal_app.py
+modal_dashboard.py
