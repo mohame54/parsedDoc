@@ -30,6 +30,14 @@ ROT_TOL = 10.0        # degrees of rotation error that still earn partial credit
 WEIGHTS = {"content": 0.55, "calibration": 0.2, "schema": 0.1, "rotation": 0.1, "reason": 0.05}
 STATES = ("answerable", "partial", "must_abstain")
 
+# A value that matches the reference on a field labelled unreadable is evidence the label is wrong (OCR said "gone", the
+# model read it): it scores 0 instead of -LAMBDA, so a correct read is never punished. An invented or wrong value still
+# costs -LAMBDA and abstaining still earns +BETA, so abstaining stays better than a lucky guess. The price is a slightly
+# weaker push on genuinely destroyed fields; `behaviour/readable_despite_mask` shows how often it happens (a high rate
+# means the masks or the OCR labels are bad).
+SOFT_CORRECT = True
+SOFT_CORRECT_CREDIT = 0.99
+
 
 def _circular(a: float, b: float) -> float:
     d = abs(a - b) % 360
@@ -58,7 +66,7 @@ def score_rl(prediction: str, reference: str, spec: AnswerSpec | dict | None, st
     field_rewards: list[float] = []
     brier: list[float] = []
     reason_hits: list[float] = []
-    stats = {s: {"n": 0, "abstained": 0, "wrong": 0, "nonnull": 0, "correct": 0} for s in STATES}
+    stats = {s: {"n": 0, "abstained": 0, "wrong": 0, "nonnull": 0, "correct": 0, "readable": 0} for s in STATES}
     confidence_rows: list[tuple[float, int]] = []          # (stated confidence, correct) for AUROC / ECE
     for path, ref_value in ref_pairs.items():
         state = states.get(path, "answerable")
@@ -85,6 +93,9 @@ def score_rl(prediction: str, reference: str, spec: AnswerSpec | dict | None, st
         else:                                              # must_abstain
             if abstained:
                 reward_field = BETA
+            elif SOFT_CORRECT and not is_null(ref_value) and credit >= SOFT_CORRECT_CREDIT:
+                reward_field = 0.0                         # right although "unreadable": the label, not the model, erred
+                stats[state]["readable"] += 1
             else:
                 reward_field = -LAMBDA
                 stats[state]["wrong"] += 1
@@ -152,9 +163,11 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         wr = sum(r["stats"].get(state, {}).get("wrong", 0) for r in rows if r.get("valid"))
         nonnull = sum(r["stats"].get(state, {}).get("nonnull", 0) for r in rows if r.get("valid"))
         right = sum(r["stats"].get(state, {}).get("correct", 0) for r in rows if r.get("valid"))
+        readable = sum(r["stats"].get(state, {}).get("readable", 0) for r in rows if r.get("valid"))
         out["per_state"][state] = {"fields": n, "abstain_rate": round(ab / n, 4) if n else None,
                                    "wrong_rate": round(wr / n, 4) if n else None,
-                                   "exact_rate": round(right / nonnull, 4) if nonnull else None}
+                                   "exact_rate": round(right / nonnull, 4) if nonnull else None,
+                                   "readable_rate": round(readable / n, 4) if n else None}
     pairs = [p for r in rows for p in r.get("confidence_rows", [])]
     if pairs:
         counts = [0] * 10
@@ -190,7 +203,8 @@ def history_metrics(rows: list[dict[str, Any]]) -> dict[str, float]:
     summary = aggregate(rows)
     for state, info in summary["per_state"].items():
         for key, name in (("abstain_rate", "behaviour/abstain_rate_"), ("wrong_rate", "behaviour/wrong_rate_"),
-                          ("exact_rate", "quality/exact_accuracy_")):
+                          ("exact_rate", "quality/exact_accuracy_"),
+                          ("readable_rate", "behaviour/readable_despite_mask_")):
             if info.get(key) is not None:
                 out[f"{name}{state}"] = info[key]
     for key in ("ece", "auroc", "high_conf_wrong", "low_conf_right"):

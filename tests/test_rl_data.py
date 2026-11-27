@@ -122,3 +122,101 @@ def test_p_clean_leaves_the_fields_unmasked():
     for seed in range(15):
         ex = build_example(base(), random.Random(seed), text_lines, no_text, level="off", p_degrade=0.0, p_clean=1.0)
         assert set(ex["states"].values()) == {"answerable"}
+
+
+# ---- the OCR guards ----------------------------------------------------------------------------------------
+
+import collections
+
+from PIL import ImageChops, ImageDraw
+
+from train.rl_data import localise as _localise, still_readable
+
+
+def striped_page():
+    """A page with a black stripe in every field's box, so a mask changes pixels there (blur included)."""
+    img = page()
+    draw = ImageDraw.Draw(img)
+    for line in LINES:
+        x0, y0, x1, y1 = line["box_px"]
+        draw.rectangle((x0 + 4, y0 + 6, x1 - 4, y1 - 6), fill=(0, 0, 0))
+    return img
+
+
+def reads(image):
+    """A pixel-level fake OCR: a line is read when its box is exactly as drawn (not masked)."""
+    original = striped_page()
+    out = []
+    for line in LINES:
+        box = tuple(int(v) for v in line["box_px"])
+        if ImageChops.difference(image.crop(box), original.crop(box)).getbbox() is None:
+            out.append(line["text"])
+    return " ".join(out)
+
+
+def striped_base():
+    return base(images=[striped_page()])
+
+
+def test_a_value_found_in_two_places_is_not_localised():
+    stats = collections.Counter()
+    lines = [{"text": "Date 2017-06-30", "box_px": [0, 0, 50, 10]}, {"text": "Paid 2017-06-30", "box_px": [0, 20, 50, 30]},
+             {"text": "Ana Lopez", "box_px": [0, 40, 50, 50]}]
+    found = _localise({"date": "2017-06-30", "name": "Ana Lopez"}, lines, stats)
+    assert set(found) == {"name"} and stats["ambiguous"] == 1 and stats["localised"] == 1
+
+
+def test_a_value_inside_a_longer_token_is_not_a_match():
+    lines = [{"text": "Invoice 1100", "box_px": [0, 0, 50, 10]}, {"text": "Total 100", "box_px": [0, 20, 50, 30]}]
+    assert _localise({"a": "100"}, lines) == {"a": [0, 20, 50, 30]}
+    assert _localise({"a": "100"}, lines[:1]) == {}
+
+
+def test_the_text_as_printed_is_what_gets_searched_for():
+    lines = [{"text": "Date: 6/30/17", "box_px": [20, 70, 160, 94]}, {"text": "Ana Lopez", "box_px": [20, 20, 160, 44]},
+             {"text": "12.5", "box_px": [20, 120, 80, 144]}]
+    for seed in range(40):
+        ex = build_example(striped_base(), random.Random(seed), lambda im: lines, reads, level="off", p_degrade=0.0,
+                           p_clean=0.0, eligible={"date": "6/30/17", "name": "Ana Lopez", "total": "12.5"})
+        if any(p == "date" and s != "answerable" for p, s in ex["states"].items()):
+            return
+    pytest.fail("the date (printed 6/30/17, labelled 2017-06-30) was never masked")
+
+
+def test_a_value_readable_before_the_turn_is_not_marked_unreadable():
+    calls = []
+
+    def ocr(image):
+        calls.append(image.size)
+        return "Ana Lopez 2017-06-30 12.5" if len(calls) == 1 else ""      # only the masked, unturned page reads fine
+
+    for seed in range(15):
+        calls.clear()
+        ex = build_example(base(), random.Random(seed), text_lines, ocr, level="strong", p_degrade=1.0, p_clean=0.0)
+        assert set(ex["states"].values()) == {"answerable"}
+
+
+def test_ocr_that_cannot_read_the_page_downgrades_unreadable_to_partial():
+    stats = collections.Counter()
+    for seed in range(30):
+        ex = build_example(base(), random.Random(seed), text_lines, no_text, level="off", p_degrade=0.0, p_clean=0.0,
+                           stats=stats)
+        assert "must_abstain" not in ex["states"].values()               # blind OCR vouches for nothing
+    assert stats["blind_examples"] > 0 and stats["downgraded_blind"] > 0
+
+
+def test_ocr_that_reads_the_unmasked_fields_lets_unreadable_labels_stand():
+    stats = collections.Counter()
+    seen = set()
+    for seed in range(60):
+        ex = build_example(striped_base(), random.Random(seed), text_lines, reads, level="off", p_degrade=0.0,
+                           p_clean=0.0, stats=stats)
+        seen |= set(ex["states"].values())
+    assert "must_abstain" in seen and stats["flipped_readable"] >= 0
+
+
+def test_near_matching_forgives_one_garbled_character_but_not_short_values():
+    assert still_readable("Ana Lopez", ["total ana lopes due"])
+    assert not still_readable("Ana Lopez", ["total john smith due"])
+    assert still_readable("12.5", ["x 12.5 y"]) and not still_readable("12.5", ["x 12.6 y"])
+    assert not still_readable("", ["anything"])

@@ -25,6 +25,43 @@ def item(i=0, pages=1, label=None):
             "images": [Image.new("RGB", (300, 200), (255, 255, 255)) for _ in range(pages)]}
 
 
+RICH_FIELDS = {"name": "Ana Lopez", "city": "Springfield", "street": "Maple Avenue", "phone": "555 0143",
+               "email": "ana at example", "total": 12.5}
+RICH_SCHEMA = {"type": "object", "properties": {k: {"type": ["number", "null"] if k == "total" else ["string", "null"]}
+                                                for k in RICH_FIELDS},
+               "required": list(RICH_FIELDS), "additionalProperties": False}
+RICH_LINES = [{"text": str(v), "box_px": [20, 20 + 40 * n, 200, 44 + 40 * n]} for n, v in enumerate(RICH_FIELDS.values())]
+
+
+def _striped():
+    from PIL import ImageDraw
+    img = Image.new("RGB", (300, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for line in RICH_LINES:
+        x0, y0, x1, y1 = line["box_px"]
+        draw.rectangle((x0 + 4, y0 + 6, x1 - 4, y1 - 6), fill=(0, 0, 0))
+    return img
+
+
+def _reads(image):
+    """A pixel-level fake OCR: a line is read when its box is exactly as drawn (that is, not masked)."""
+    from PIL import ImageChops
+    original = _striped()
+    return " ".join(line["text"] for line in RICH_LINES
+                    if ImageChops.difference(image.crop(tuple(line["box_px"])), original.crop(tuple(line["box_px"]))).getbbox() is None)
+
+
+def rich_item(i=0):
+    """A page with six fields OCR reads (unless a mask hides one), so unreadable fields can exist (see rl_data.MIN_CONTROLS)."""
+    return {"id": f"doc:{i}#extract_to_schema0", "label": json.dumps(RICH_FIELDS), "images": [_striped()],
+            "prompt": "Extract the data.\n\nJSON Schema:\n" + json.dumps(RICH_SCHEMA)}
+
+
+def build_rich(tmp_path, items, **kw):
+    return build_rows(items, tmp_path, ocr_lines=lambda im: RICH_LINES, ocr_text=_reads, level="off",
+                      **{"p_degrade": 0.0, "p_clean": 0.0, **kw})
+
+
 def build(tmp_path, items, **kw):
     return build_rows(items, tmp_path, ocr_lines=lambda im: LINES, ocr_text=lambda im: "", level="strong", **kw)
 
@@ -240,3 +277,34 @@ def test_epochs_replace_the_step_limit():
     assert rl.trl_max_steps(rl.parse_args(["train", "--data", "d", "--max-steps", "30"])) == 30
     five = rl.parse_args(["train", "--data", "d", "--epochs", "5"])
     assert five.epochs == 5 and rl.trl_max_steps(five) == -1
+
+
+def test_eligible_anchors_take_only_extracted_high_confidence_fields_with_their_printed_text():
+    from train.rl import eligible_anchors
+    record = {"fields": [
+        {"section": "s", "name": "date", "raw_value": "6/30/17", "normalized_value": "2017-06-30", "status": "extracted",
+         "confidence": "high"},
+        {"section": "s", "name": "maybe", "raw_value": "x", "status": "extracted", "confidence": "medium"},
+        {"section": "s", "name": "missing", "raw_value": "", "status": "extracted", "confidence": "high"},
+        {"section": "t", "name": "gone", "raw_value": "y", "status": "unreadable", "confidence": "high"}]}
+    assert eligible_anchors(record) == {"s.date": "6/30/17"}
+
+
+def test_only_the_eligible_fields_are_masked_and_the_guard_counters_are_kept(tmp_path):
+    import collections
+    stats = collections.Counter()
+    rows = build_rich(tmp_path, [rich_item(i) for i in range(30)], stats=stats,
+                      eligible=lambda item_id: {"name": "Ana Lopez", "city": "Springfield"})
+    masked = {p for r in rows for p, s in json.loads(r["states"]).items() if s != "answerable"}
+    assert masked and masked <= {"name", "city"}
+    assert stats["examples"] == 30 and stats["masked"] > 0 and stats["localised"] > 0
+
+
+def test_the_preview_page_shows_every_field_with_its_state(tmp_path):
+    from train.rl import write_preview
+    rows = build_rich(tmp_path, [rich_item(i) for i in range(6)])
+    write_rows(rows, tmp_path)
+    (tmp_path / "build_stats.json").write_text(json.dumps({"examples": 6}))
+    page = write_preview(tmp_path, tmp_path / "preview", n=3).read_text()
+    assert page.count("class='ex'") == 3 and "answerable" in page
+    assert "ana lopez" in page.lower() and '"examples": 6' in page

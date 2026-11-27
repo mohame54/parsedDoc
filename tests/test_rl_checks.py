@@ -7,14 +7,14 @@ import types
 import pytest
 import torch
 
-from tests.test_rl import build, item
+from tests.test_rl import build, build_rich, item, rich_item
 from train import rl_checks
 from train.rl import reward_function
 
 
 @pytest.fixture()
 def rows(tmp_path):
-    return build(tmp_path, [item(i) for i in range(40)]), tmp_path
+    return build_rich(tmp_path, [rich_item(i) for i in range(40)]), tmp_path
 
 
 def by_name(checks):
@@ -161,3 +161,17 @@ def test_the_format_mix_counts_the_plain_format_written_as_null(rows):
     data, _ = rows
     plain = [dict(r, spec="null") for r in data[:10]]            # how `build` writes a row in the plain format
     assert "0% of examples use the extended" in by_name(rl_checks._balance(plain))["format mix"].detail
+
+
+def test_the_build_audit_reads_the_ocr_guard_counters(tmp_path):
+    def audit(stats):
+        (tmp_path / "build_stats.json").write_text(json.dumps(stats))
+        return rl_checks._build_audit(tmp_path)[0]
+
+    assert audit({"examples": 10, "masked": 8, "localised": 30, "ambiguous": 2, "flipped_readable": 1,
+                  "blind_examples": 1}).status == "pass"
+    assert audit({"examples": 10, "masked": 8, "blind_examples": 6}).status == "warn"          # OCR often blind
+    assert audit({"examples": 10, "masked": 8, "flipped_readable": 6}).status == "warn"        # masks hide nothing
+    assert audit({"examples": 10, "masked": 0}).status == "warn"
+    (tmp_path / "build_stats.json").unlink()
+    assert rl_checks._build_audit(tmp_path)[0].status == "warn"                                 # older build

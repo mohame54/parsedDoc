@@ -154,7 +154,37 @@ def check_data(rows: list[dict[str, Any]], data_dir: Path, max_completion_tokens
         out.append(Check("answer length", "pass", f"longest best answer ~{longest / CHARS_PER_TOKEN:.0f} tokens, "
                                                   f"budget {max_completion_tokens}"))
     out.extend(_balance(rows))
+    out.extend(_build_audit(data_dir))
     return out
+
+
+BLIND_WARN = 0.3          # share of masked examples whose OCR could not read the unmasked fields
+FLIPPED_WARN = 0.5        # share of masks that turned out to hide nothing (the value was still readable)
+
+
+def _build_audit(data_dir: Path) -> list[Check]:
+    """What the OCR guards did while the data was built (build_stats.json): many examples where OCR was blind, or many
+    masks that hid nothing, mean the unreadable labels are only as good as an OCR that is not working here."""
+    path = Path(data_dir) / "build_stats.json"
+    if not path.exists():
+        return [Check("build audit", "warn", "no build_stats.json next to the data (built by an older version): the "
+                                             "OCR guards cannot be audited; rebuild to get it")]
+    stats = json.loads(path.read_text())
+    masked, examples_masked = stats.get("masked", 0), max(1, stats.get("examples", 0))
+    if not masked:
+        return [Check("build audit", "warn", "no field was masked at all: nothing teaches abstention (OCR found too few "
+                                             "fields it could place uniquely, or --p-clean is too high)")]
+    blind = stats.get("blind_examples", 0) / examples_masked
+    flipped = stats.get("flipped_readable", 0) / masked
+    detail = (f"{stats.get('localised', 0)} fields placed, {stats.get('ambiguous', 0)} skipped as ambiguous, "
+              f"{masked} masked, {flipped:.0%} of masks still readable, {blind:.0%} of examples with blind OCR "
+              f"({stats.get('downgraded_blind', 0)} labels downgraded to partial)")
+    if blind > BLIND_WARN:
+        return [Check("build audit", "warn", detail + ": OCR often cannot read the degraded page, so many unreadable "
+                      "labels fell back to partial; use --level soft or a lower --p-degrade")]
+    if flipped > FLIPPED_WARN:
+        return [Check("build audit", "warn", detail + ": most masks hide nothing OCR can see; check the preview")]
+    return [Check("build audit", "pass", detail)]
 
 
 def _balance(rows: list[dict[str, Any]]) -> list[Check]:

@@ -40,7 +40,7 @@ def test_abstaining_on_a_readable_field_is_worse_than_answering_it_right():
 
 
 def test_guessing_an_unreadable_field_is_worse_than_abstaining_on_it():
-    guessed = r(out(name=("ana", 60)))
+    guessed = r(out(name=("bob", 60)))
     abstained = r(out(name=(None, 5)))
     assert abstained["total"] > guessed["total"]
     assert guessed["stats"]["must_abstain"]["wrong"] == 1 and abstained["stats"]["must_abstain"]["abstained"] == 1
@@ -99,10 +99,27 @@ def test_the_plain_format_scores_without_confidence_or_rotation_terms():
 
 def test_aggregate_reports_rates_and_auroc():
     good = [r(out(total=(12.5, 95)))]
-    bad = [r(out(total=(99.0, 99), name=("ana", 90)))]
+    bad = [r(out(total=(99.0, 99), name=("bob", 90)))]
     summary = aggregate(good + bad)
     assert summary["examples"] == 2
     assert summary["per_state"]["must_abstain"]["wrong_rate"] == 0.5
     assert summary["high_conf_wrong"] > 0 and summary["auroc"] is not None
     perfect = aggregate([r(out(total=(99.0, 99))), r(out(total=(0.0, 1)))])
     assert perfect["auroc"] is not None
+
+
+def test_a_correct_value_on_a_field_labelled_unreadable_is_not_punished():
+    """The label may be the thing that is wrong (OCR lost a value that is still on the page)."""
+    right = r(out(name=("ana", 60)))
+    wrong = r(out(name=("bob", 60)))
+    abstained = r(out(name=(None, 5)))
+    assert right["stats"]["must_abstain"]["readable"] == 1 and right["stats"]["must_abstain"]["wrong"] == 0
+    assert wrong["stats"]["must_abstain"]["wrong"] == 1 and wrong["stats"]["must_abstain"]["readable"] == 0
+    assert abstained["total"] > right["total"] > wrong["total"]      # abstaining still beats a lucky guess
+
+
+def test_the_readable_despite_mask_rate_is_reported():
+    from train.rl_reward import history_metrics
+    rows = [r(out(name=("ana", 60))), r(out(name=(None, 5)))]
+    assert aggregate(rows)["per_state"]["must_abstain"]["readable_rate"] == 0.5
+    assert history_metrics(rows)["behaviour/readable_despite_mask_must_abstain"] == 0.5

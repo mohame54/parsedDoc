@@ -20,7 +20,9 @@ transform (train/processors), so this is the first thing to check on the first r
 from __future__ import annotations
 
 import argparse
+import collections
 import dataclasses
+import html
 import json
 import logging
 import random
@@ -46,11 +48,21 @@ def safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text)[:120]
 
 
+def eligible_anchors(record: dict[str, Any]) -> dict[str, str]:
+    """{label path: the text as printed on the page} for the fields it is safe to mask: extracted with high confidence.
+    Paths are `section.name`, as `flatten` names them; the printed text is `raw_value` (what OCR will see)."""
+    return {f"{f['section']}.{f['name']}": str(f.get("raw_value") or "") for f in record.get("fields", [])
+            if f.get("status") == "extracted" and f.get("confidence") == "high" and f.get("raw_value")}
+
+
 def build_rows(items: Iterable[dict[str, Any]], out_dir: Path, ocr_lines: Callable = rapidocr_lines,
                ocr_text: Callable = rapidocr_text, level: str = "strong", p_degrade: float = 0.8,
-               seed: int = 0, p_clean: float = 0.25) -> list[dict[str, Any]]:
+               seed: int = 0, p_clean: float = 0.25, eligible: Callable[[str], Any] | None = None,
+               stats: collections.Counter | None = None) -> list[dict[str, Any]]:
     """One row per usable item: the image is saved, the reward's metadata is stored next to the prompt.
-    Multi-page items, items without a JSON schema in the prompt, and implausible references are left out."""
+    Multi-page items, items without a JSON schema in the prompt, and implausible references are left out.
+    `eligible(item_id)` gives the fields that may be masked (see `eligible_anchors`); `stats` counts what the OCR
+    guards did (see rl_data.build_example)."""
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     rows = []
     for n, item in enumerate(items):
@@ -58,7 +70,8 @@ def build_rows(items: Iterable[dict[str, Any]], out_dir: Path, ocr_lines: Callab
         if len(item["images"]) != 1 or schema is None or suspicious_reference(item["label"]):
             continue
         example = build_example(item, random.Random(f"{seed}:{n}:{item['id']}"), ocr_lines, ocr_text,
-                                level=level, p_degrade=p_degrade, p_clean=p_clean)
+                                level=level, p_degrade=p_degrade, p_clean=p_clean,
+                                eligible=eligible(item["id"]) if eligible else None, stats=stats)
         image_rel = f"images/{safe_name(item['id'])}.png"
         example["images"][0].save(out_dir / image_rel)
         spec = example["spec"]
@@ -247,12 +260,58 @@ def cmd_build(args: argparse.Namespace) -> None:
                               samples_per_document=args.samples_per_document, max_documents=args.max_documents,
                               seed=args.seed)
     out_dir = Path(args.out)
+    by_id = {record["id"]: record for record in dataset.records}
+    stats: collections.Counter = collections.Counter()
     rows = build_rows((dataset[i] for i in range(len(dataset))), out_dir, level=args.level,
-                      p_degrade=args.p_degrade, seed=args.seed, p_clean=args.p_clean)
+                      p_degrade=args.p_degrade, seed=args.seed, p_clean=args.p_clean, stats=stats,
+                      eligible=lambda item_id: eligible_anchors(by_id.get(item_id.split("#")[0], {})))
     path = write_rows(rows, out_dir)
+    (out_dir / STATS_FILE).write_text(json.dumps(dict(stats), indent=2, sort_keys=True), encoding="utf-8")
     states = [s for r in rows for s in json.loads(r["states"]).values()]
     log.info("wrote %d examples to %s (fields: %d answerable, %d partial, %d must_abstain)", len(rows), path,
              states.count("answerable"), states.count("partial"), states.count("must_abstain"))
+    log.info("OCR guards: %s", ", ".join(f"{k}={v}" for k, v in sorted(stats.items()) if not k.startswith("state_")))
+
+
+STATS_FILE = "build_stats.json"
+_COLORS = {"answerable": "#d4edda", "partial": "#fff3cd", "must_abstain": "#f8d7da"}
+
+
+def write_preview(data_dir: Path, out: Path, n: int = 20, seed: int = 0) -> Path:
+    """A page of `n` random examples to look at before spending GPU time: the image, and every field with its state
+    (green readable, yellow partial, red unreadable) and the reason tag, next to the build counters."""
+    rows = load_rows(data_dir)
+    random.Random(seed).shuffle(rows)
+    out.mkdir(parents=True, exist_ok=True)
+    stats_path = data_dir / STATS_FILE
+    stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
+    parts = ["<!doctype html><meta charset='utf-8'><title>RL preview</title><style>body{font:14px sans-serif;margin:16px}"
+             ".ex{display:flex;gap:16px;margin:0 0 24px;border-top:1px solid #ccc;padding-top:12px}"
+             ".ex img{max-width:420px;max-height:560px}td{padding:2px 8px}</style>",
+             "<h1>RL preview</h1><pre>" + html.escape(json.dumps(stats, indent=1, sort_keys=True), quote=False) + "</pre>"]
+    for row in rows[:n]:
+        states, tags = json.loads(row["states"]), json.loads(row.get("tags") or "{}")
+        reference = json.loads(row["reference"])
+        cells = "".join(
+            f"<tr style='background:{_COLORS.get(state, '#eee')}'><td>{html.escape(path)}</td><td>{state}</td>"
+            f"<td>{html.escape(tags.get(path, ''))}</td><td>{html.escape(str(_leaf(reference, path)))}</td></tr>"
+            for path, state in sorted(states.items()))
+        parts.append(f"<div class='ex'><img src='{html.escape(str((data_dir / row['image']).resolve()))}'>"
+                     f"<div><b>{html.escape(row['id'])}</b> upright turn {row['upright']:.0f}&deg;"
+                     f"<table><tr><th>field</th><th>state</th><th>tag</th><th>reference</th></tr>{cells}</table></div></div>")
+    path = out / "preview.html"
+    path.write_text("\n".join(parts), encoding="utf-8")
+    return path
+
+
+def _leaf(tree: Any, path: str) -> Any:
+    """The value at a `flatten` path in the plain reference (best effort: list items are shown as their path)."""
+    from .gen_eval import flatten
+    return flatten(tree).get(path, "")
+
+
+def cmd_preview(args: argparse.Namespace) -> None:
+    print(write_preview(Path(args.data), Path(args.out), args.n, args.seed))
 
 
 def _dtype(args: argparse.Namespace):
@@ -353,6 +412,11 @@ def _model_args(p: argparse.ArgumentParser) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
+    v = sub.add_parser("preview", help="write preview.html: sample examples with each field's state, to look at before training")
+    v.add_argument("--data", required=True, help="the folder `build` wrote")
+    v.add_argument("--out", default="preview")
+    v.add_argument("--n", type=int, default=20)
+    v.add_argument("--seed", type=int, default=0)
     b = sub.add_parser("build", help="build the RL data (masks, rotation, degradation, field states)")
     b.add_argument("--root", required=True, help="the export folder with train.jsonl")
     b.add_argument("--out", required=True, help="where the RL data is written")
@@ -408,7 +472,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     args = parse_args(argv)
-    {"build": cmd_build, "train": cmd_train, "check": cmd_check}[args.command](args)
+    {"build": cmd_build, "train": cmd_train, "check": cmd_check, "preview": cmd_preview}[args.command](args)
 
 
 if __name__ == "__main__":
