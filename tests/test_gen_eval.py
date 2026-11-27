@@ -5,7 +5,7 @@ import pytest
 import torch
 from PIL import Image
 
-from train.gen_eval import extract_json, flatten, normalise, score_example, summarise
+from train.gen_eval import extract_json, flatten, normalise, score_example, summarise, value_credit, reward, suspicious_reference, schema_from_prompt, schema_score
 
 
 def test_json_is_found_inside_fences_and_surrounding_text():
@@ -43,13 +43,63 @@ def test_short_answers_are_exact_matches_and_long_text_gets_a_similarity():
     assert normalise("A \n b") == "a b"
 
 
+@pytest.mark.parametrize("pred, ref", [
+    ("30/06/2017", "2017-06-30"), ("June 30, 2017", "2017-06-30"), ("30. Juni 2017", "2017-06-30"),
+    ("7:30pm", "19:30"), ("1:45 P. M.", "1: 45 p. m."), ("$7,569,000.00", "7569000.0"), ("1.234,56", "1234.56"),
+    ("(12)", "-12"), ("N/A", ""), ("Yes", "true"), ("Straße", "STRASSE"), ("Carlton, Private Stock", "Private Stock, Carlton")])
+def test_values_that_mean_the_same_get_full_credit(pred, ref):
+    assert value_credit(pred, ref) == 1.0
+
+
+@pytest.mark.parametrize("pred, ref", [("2017-06-29", "2017-06-30"), ("7:30am", "19:30"), ("514.35", "514.36"),
+                                       ("2010-09-01", "05-05"), ("\u2612", "\u2610"), ("\u2612", "")])
+def test_values_that_differ_still_get_no_credit(pred, ref):
+    assert value_credit(pred, ref) == 0.0
+
+
+def test_a_key_left_out_where_the_reference_is_null_is_correct():
+    ref = json.dumps({"a": "x", "b": None})
+    assert score_example('{"a": "x"}', ref)["score"] == 1.0
+    assert score_example('{"a": "x", "b": "invented"}', ref)["score"] < 1.0
+
+
+def test_reward_floors_valid_json_penalises_invention_and_flags_bad_references():
+    ref = json.dumps({"a": "x", "b": None})
+    assert reward(ref, ref) == 1.0 and reward("not json", ref) == 0.0
+    assert reward('{"a": "x", "b": "guess"}', ref) < reward('{"a": "x", "b": null}', ref)
+    assert reward('{"a": "wrong", "b": null}', ref) >= 0.05                      # valid JSON keeps a little
+    assert suspicious_reference('{"d": "2094-04-28"}') and not suspicious_reference('{"d": "2017-06-30"}')
+
+
+PROMPT = 'Extract. JSON Schema: {"type":"object","properties":{"n":{"type":["number","null"]},"s":{"type":["string","null"]}},"required":["n","s"],"additionalProperties":false} Reference'
+
+
+def test_schema_compliance_is_part_of_the_reward():
+    schema = schema_from_prompt(PROMPT)
+    assert schema["required"] == ["n", "s"] and schema_from_prompt("no schema here") is None
+    assert schema_score({"n": 1, "s": "a"}, schema) == 1.0
+    assert schema_score({"n": "1", "s": "a", "extra": 1}, schema) < 1.0
+    ref = '{"n": 5, "s": "a"}'
+    assert reward(ref, ref, PROMPT) == 1.0
+    assert reward('{"n": "5", "s": "a"}', ref, PROMPT) < 1.0 and reward('{"n": "5", "s": "a"}', ref) == 1.0
+    assert reward('{"n": 5, "s": "a"', ref, PROMPT) == 0.0                       # cut off: the gate is closed
+
+
+def test_line_items_are_matched_by_content_not_position():
+    ref = json.dumps({"items": [{"d": "tea", "p": 2.5}, {"d": "cake", "p": 4}, {"d": "milk", "p": 1}]})
+    shuffled = json.dumps({"items": [{"d": "milk", "p": 1.0}, {"d": "tea", "p": "2.50"}, {"d": "cake", "p": 4}]})
+    assert score_example(shuffled, ref)["value_f1"] == 1.0
+    missing = json.dumps({"items": [{"d": "cake", "p": 4}, {"d": "tea", "p": 2.5}]})
+    assert 0.5 < score_example(missing, ref)["value_f1"] < 1.0
+
+
 def test_the_summary_averages_per_task_and_counts_valid_json():
     rows = [{"task": "extract", "kind": "json", "json_valid": True, "path_f1": 1.0, "score": 0.5},
             {"task": "extract", "kind": "json", "json_valid": False, "path_f1": 0.0, "score": 0.0},
             {"task": "classify", "kind": "short", "exact_match": True, "score": 1.0}]
     out = summarise(rows)
     assert out["examples"] == 3 and out["per_task"]["extract"] == {"n": 2, "score": 0.25, "json_valid": 0.5,
-                                                                    "path_f1": 0.5, "strict_f1": None, "kind": "json"}
+                                                                    "path_f1": 0.5, "strict_f1": None, "hallucination": None, "kind": "json"}
     assert out["per_task"]["classify"]["score"] == 1.0 and out["json_valid"] == 0.5
 
 

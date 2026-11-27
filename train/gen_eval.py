@@ -12,8 +12,10 @@ During training the same check runs before the first step (the base model) and a
 
 How an answer is scored (chosen from the reference, so every task is covered):
   * JSON answers (extract, schema, tables, figures, ...): `json_valid` (does it parse), and the F1 of the (path, value)
-    pairs against the reference. A value counts fully when it is the same up to case, spacing and punctuation (or the
-    same number) and partly when it is at least 85% similar (a one-character slip); `strict_f1` is the all-or-nothing
+    pairs against the reference. A value counts fully when it means the same: equal up to case, accents, spacing and
+    punctuation, or the same number (`$7,569,000.00` = `7569000`), date (`30/06/2017` = `2017-06-30`), time
+    (`7:30pm` = `19:30`), yes/no, or both empty (`null` = `N/A`, a key left out where the reference is null). It
+    counts partly when it is at least 85% similar (a one-character slip) or shares at least half of its words; `strict_f1` is the all-or-nothing
     version, `path_f1` ignores the values (right structure, wrong values still count). Lists of records are
     matched by their `name` / `id` and not by position, so a different order is not an error.
   * short answers (classify, a field's value, a chart question): match after case, spacing and punctuation are removed.
@@ -29,7 +31,8 @@ import json
 import logging
 import re
 import time
-from collections import defaultdict
+import unicodedata
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -65,21 +68,29 @@ def extract_json(text: str) -> Any | None:
     return None
 
 
+GAP = object()                 # a hole left in an aligned list where the model produced no matching item
+
+
+def record_label(item: Any, index: int) -> str:
+    """How a list item is named in a path: its name / id when it has one (so order does not matter), else its index."""
+    if isinstance(item, dict):
+        for id_key in ID_KEYS:
+            if isinstance(item.get(id_key), (str, int)) and str(item[id_key]).strip():
+                return f"{id_key}={squash(item[id_key]) or normalise(item[id_key])}"
+    return str(index)
+
+
 def flatten(value: Any, prefix: str = "") -> dict[str, str]:
     """{path: normalised leaf}. A list of records is keyed by each record's name / id, so order does not matter."""
     out: dict[str, str] = {}
+    if value is GAP:
+        return out
     if isinstance(value, dict):
         for key, item in value.items():
             out.update(flatten(item, f"{prefix}.{key}" if prefix else str(key)))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            label = str(index)
-            if isinstance(item, dict):
-                for id_key in ID_KEYS:
-                    if isinstance(item.get(id_key), (str, int)) and str(item[id_key]).strip():
-                        label = f"{id_key}={normalise(item[id_key])}"
-                        break
-            out.update(flatten(item, f"{prefix}[{label}]"))
+            out.update(flatten(item, f"{prefix}[{record_label(item, index)}]"))
     else:
         out[prefix] = normalise("" if value is None else value)
     return out
@@ -96,34 +107,195 @@ def _f1(predicted: set, reference: set) -> float:
 
 
 SOFT_THRESHOLD = 0.85          # a value at least this similar to the reference earns partial credit
+TOKEN_THRESHOLD = 0.5          # ... and so does a value that shares at least this much of its words with it
+
+NULLISH = {"", "null", "none", "n/a", "na", "nan", "nil", "-", "--", "\u2014", "\u2013", "undefined"}
+TRUE_WORDS, FALSE_WORDS = {"true", "yes", "y", "ja", "oui", "checked", "1"}, {"false", "no", "n", "nein", "non", "unchecked", "0"}
+
+MONTHS = {}
+for _index, _names in enumerate([
+        "january jan januar janvier janv", "february feb februar fevrier fevr", "march mar marz mars maerz",
+        "april apr avril", "may mai", "june jun juni juin", "july jul juli juillet juil",
+        "august aug aout", "september sep sept", "october oct oktober octobre okt",
+        "november nov", "december dec dezember decembre dez"], start=1):
+    for _name in _names.split():
+        MONTHS.setdefault(_name, _index)
+
+
+def fold(text: Any) -> str:
+    """Case-, accent- and width-folded text (`Straße` == `STRASSE`, `é` == `e`, full-width digits are digits)."""
+    text = unicodedata.normalize("NFKD", str(text)).casefold()
+    return "".join(c for c in text if not unicodedata.combining(c))
 
 
 def squash(text: Any) -> str:
-    """Case, spacing and punctuation removed: `S (238969)` and `S(238969)` are the same value."""
-    return re.sub(r"[\W_]+", "", str(text).casefold())
+    """Case, accents, spacing and punctuation removed: `S (238969)` and `S(238969)` are the same value."""
+    return re.sub(r"[\W_]+", "", fold(text))
 
 
-def _number(text: str) -> float | None:
+def is_null(text: Any) -> bool:
+    return normalise(text) in NULLISH
+
+
+def parse_number(text: Any) -> float | None:
+    """A number written the way documents write them: `$1,234.50`, `1.234,50 EUR`, `(12)`, `15%`, `7569000.0`."""
+    s = str(text).strip()
+    if not s:
+        return None
+    negative = s.startswith("(") and s.endswith(")") or s.startswith("-") or s.startswith("\u2212")
+    s = re.sub(r"(?i)^[\s(+\-\u2212]*|[)\s]*$", "", s)
+    s = re.sub(r"(?i)^(?:[^\d.,]{1,4})\s*(?=\d)", "", s)                  # a leading currency sign or code
+    s = re.sub(r"(?i)\s*(?:%|[^\d.,\s]{1,4}|\s)$", "", s)                  # a trailing %, unit or currency code
+    s = s.replace("\u00a0", " ").replace("'", "")
+    if re.fullmatch(r"\d{1,3}(?: \d{3})+(?:[.,]\d+)?", s):
+        s = s.replace(" ", "")
+    if not re.fullmatch(r"\d[\d.,]*|[.,]\d+", s):
+        return None
+    if "." in s and "," in s:                                              # the later mark is the decimal point
+        point = "." if s.rfind(".") > s.rfind(",") else ","
+        s = s.replace("," if point == "." else ".", "").replace(point, ".")
+    elif "," in s:
+        s = s.replace(",", "") if re.fullmatch(r"\d{1,3}(?:,\d{3})+", s) else s.replace(",", ".")
+    elif s.count(".") > 1:
+        if not re.fullmatch(r"\d{1,3}(?:\.\d{3})+", s):
+            return None
+        s = s.replace(".", "")
     try:
-        return float(str(text).replace(",", "").strip())
+        value = float(s)
     except ValueError:
         return None
+    return -value if negative else value
+
+
+def _year(text: str) -> int:
+    year = int(text)
+    return year if len(text) == 4 else (2000 + year if year <= 69 else 1900 + year)
+
+
+def parse_dates(text: Any) -> list[tuple[int | None, int, int]]:
+    """Every (year, month, day) a date string can mean (a day/month order that is not clear gives both). A date
+    without a year has `None` for it. Empty when the text is not a date."""
+    s = fold(text).strip()
+    s = re.sub(r"\b(mon|tue|wed|thu|fri|sat|sun|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)[a-z]*\.?,?\s*", "", s)
+    s = re.sub(r"(?<=\d)(st|nd|rd|th|er|e)\b", "", s)
+    s = re.sub(r"[,\s]+", " ", s.replace("\u2013", "-")).strip()
+    out: list[tuple[int | None, int, int]] = []
+
+    def add(year, month, day):
+        if 1 <= month <= 12 and 1 <= day <= 31 and (year is None or 1000 <= year <= 2999):
+            out.append((year, month, day))
+
+    if m := re.fullmatch(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})(?:[t ]\d{1,2}:\d{2}.*)?", s):
+        add(int(m[1]), int(m[2]), int(m[3]))
+    elif m := re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{4}|\d{2})", s):
+        add(_year(m[3]), int(m[2]), int(m[1]))                             # day first (the order outside the US)
+        add(_year(m[3]), int(m[1]), int(m[2]))
+    elif m := re.fullmatch(r"(\d{4})(\d{2})(\d{2})", s):
+        add(int(m[1]), int(m[2]), int(m[3]))
+    elif m := re.fullmatch(r"(\d{1,2})\.? ?-?([a-z]+)\.?[ -]?(\d{4}|\d{2})", s):
+        if m[2] in MONTHS:
+            add(_year(m[3]), MONTHS[m[2]], int(m[1]))
+    elif m := re.fullmatch(r"([a-z]+)\.? (\d{1,2}) (\d{4}|\d{2})", s):
+        if m[1] in MONTHS:
+            add(_year(m[3]), MONTHS[m[1]], int(m[2]))
+    elif m := re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", s):                  # no year: `05-05`
+        add(None, int(m[2]), int(m[1]))
+        add(None, int(m[1]), int(m[2]))
+    elif m := re.fullmatch(r"(\d{1,2})\.? ?([a-z]+)\.?", s):
+        if m[2] in MONTHS:
+            add(None, MONTHS[m[2]], int(m[1]))
+    elif m := re.fullmatch(r"([a-z]+)\.? (\d{1,2})", s):
+        if m[1] in MONTHS:
+            add(None, MONTHS[m[1]], int(m[2]))
+    return out
+
+
+def parse_time(text: Any) -> int | None:
+    """Seconds since midnight for `19:30`, `7:30pm`, `1: 45 P. M.`, `19.30 Uhr`; None when it is not a time."""
+    s = re.sub(r"\s+", "", fold(text))
+    m = re.fullmatch(r"(\d{1,2})[:.h](\d{2})(?:[:.](\d{2}))?(?:([ap])\.?m\.?)?(?:uhr)?", s)
+    if not m:
+        return None
+    hour, minute, second = int(m[1]), int(m[2]), int(m[3] or 0)
+    if m[4]:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if m[4] == "p" else 0)
+    return hour * 3600 + minute * 60 + second if hour < 24 and minute < 60 and second < 60 else None
+
+
+def _dates_agree(a: list, b: list) -> bool:
+    for (ya, ma, da) in a:
+        for (yb, mb, db) in b:
+            if (ma, da) == (mb, db) and (ya is None or yb is None or ya == yb):
+                return True
+    return False
+
+
+def _token_f1(a: str, b: str) -> float:
+    """F1 over the words of two strings, order ignored: `Private Stock, Carlton` against `Carlton` is 0.67."""
+    x, y = Counter(re.findall(r"\w+", fold(a))), Counter(re.findall(r"\w+", fold(b)))
+    hits = sum((x & y).values())
+    if not hits:
+        return 0.0
+    precision, recall = hits / sum(x.values()), hits / sum(y.values())
+    return 2 * precision * recall / (precision + recall)
 
 
 def value_credit(predicted: str, reference: str) -> float:
-    """0..1 for one value: 1 when it is the same up to case, spacing and punctuation (or the same number), the
-    character similarity when it is close (>= SOFT_THRESHOLD), else 0. A read-off error of one character is not a
-    wrong answer, a different value is."""
+    """0..1 for one value. 1 when both mean the same thing: the same text up to case, accents, spacing and
+    punctuation, the same number (`7,569,000.00` = `7569000`), the same date (`30/06/2017` = `2017-06-30` =
+    `June 30, 2017`), the same time (`7:30pm` = `19:30`), the same yes/no, or both empty (`null` = `` = `N/A`).
+    Otherwise the character similarity when it is close (>= SOFT_THRESHOLD), or the word overlap when the value has
+    several words and enough of them are right; else 0. A read-off error of one character is not a wrong answer,
+    a different value is."""
     if predicted == reference:
         return 1.0
+    p_null, r_null = is_null(predicted), is_null(reference)
+    if p_null or r_null:
+        return 1.0 if p_null and r_null else 0.0
     a, b = squash(predicted), squash(reference)
-    if a == b:
+    if a and a == b:
         return 1.0
-    x, y = _number(predicted), _number(reference)
+    if not a or not b:                                                     # only symbols (a checkbox): exact compare
+        return 1.0 if normalise(predicted) == normalise(reference) else 0.0
+    x, y = parse_number(predicted), parse_number(reference)
     if x is not None and y is not None:
         return 1.0 if abs(x - y) <= 1e-9 * max(1.0, abs(y)) else 0.0
+    p_date, r_date = parse_dates(predicted), parse_dates(reference)
+    if p_date and r_date:
+        return 1.0 if _dates_agree(p_date, r_date) else 0.0
+    p_time, r_time = parse_time(predicted), parse_time(reference)
+    if p_time is not None and r_time is not None:
+        return 1.0 if p_time == r_time or (p_time % 60 == 0 or r_time % 60 == 0) and p_time // 60 == r_time // 60 else 0.0
+    p_word, r_word = normalise(predicted), normalise(reference)
+    if (p_word in TRUE_WORDS | FALSE_WORDS) and (r_word in TRUE_WORDS | FALSE_WORDS):
+        return 1.0 if (p_word in TRUE_WORDS) == (r_word in TRUE_WORDS) else 0.0
+    if x is not None or y is not None or p_date or r_date:                 # a number / date against something else
+        return 0.0
+    credit = 0.0
     ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
-    return round(ratio, 4) if ratio >= SOFT_THRESHOLD else 0.0
+    if ratio >= SOFT_THRESHOLD:
+        credit = ratio
+    if len(re.findall(r"\w+", reference)) > 1 or len(re.findall(r"\w+", predicted)) > 1:
+        overlap = _token_f1(predicted, reference)
+        if overlap >= TOKEN_THRESHOLD:
+            credit = max(credit, overlap)
+    return round(credit, 4)
+
+
+def _match_values(predicted: dict[str, str], reference: dict[str, str]) -> dict[str, str]:
+    """A key the model left out where the reference is null is a correct null, not a miss."""
+    filled = dict(predicted)
+    for path, value in reference.items():
+        if path not in filled and is_null(value):
+            filled[path] = ""
+    return filled
+
+
+def _strict_key(value: str) -> str:
+    number = parse_number(value) if value else None
+    return f"#{number!r}" if number is not None else ("" if is_null(value) else value)
 
 
 def soft_f1(predicted: dict[str, str], reference: dict[str, str]) -> float:
@@ -145,18 +317,120 @@ def score_example(prediction: str, reference: str) -> dict[str, Any]:
         pred_json = extract_json(prediction)
         valid = pred_json is not None
         ref_pairs = flatten(ref_json)
-        pred_pairs = flatten(pred_json) if valid else {}
-        strict = _f1(set(pred_pairs.items()), set(ref_pairs.items()))
+        pred_pairs = _match_values(flatten(align(pred_json, ref_json)), ref_pairs) if valid else {}
+        strict = _f1({(k, _strict_key(v)) for k, v in pred_pairs.items()},
+                     {(k, _strict_key(v)) for k, v in ref_pairs.items()})
         value_f1 = soft_f1(pred_pairs, ref_pairs)
         path_f1 = _f1(set(pred_pairs), set(ref_pairs))
+        null_paths = [path for path, value in ref_pairs.items() if is_null(value)]
+        invented = sum(1 for path in null_paths if not is_null(pred_pairs.get(path, "")))
         return {"kind": "json", "json_valid": valid, "path_f1": round(path_f1, 4), "value_f1": round(value_f1, 4),
-                "strict_f1": round(strict, 4), "score": round(value_f1, 4)}
+                "strict_f1": round(strict, 4), "_answer": pred_json, "hallucination": round(invented / len(null_paths), 4) if null_paths else 0.0,
+                "score": round(value_f1, 4)}
     if len(reference.split()) <= SHORT_ANSWER_WORDS:
         strict = normalise(prediction) == normalise(reference)
-        match = strict or (bool(squash(reference)) and squash(prediction) == squash(reference))
+        match = strict or value_credit(prediction, reference) == 1.0       # same number / date / time / spelling
         return {"kind": "short", "exact_match": strict, "score": float(match)}
     ratio = difflib.SequenceMatcher(None, normalise(prediction), normalise(reference), autojunk=False).ratio()
     return {"kind": "text", "similarity": round(ratio, 4), "score": round(ratio, 4)}
+
+
+def _has_id(items: list) -> bool:
+    return any(isinstance(i, dict) and any(isinstance(i.get(k), (str, int)) and str(i[k]).strip() for k in ID_KEYS)
+               for i in items)
+
+
+def align(predicted: Any, reference: Any) -> Any:
+    """The prediction with every list that has no ids (line items, table rows) put in the reference's order: each
+    predicted item is paired with the reference item it matches best, so `[b, a]` against `[a, b]` is not wrong.
+    Items nothing matches go after the reference's, and a reference item nothing matches leaves a hole."""
+    if isinstance(predicted, dict) and isinstance(reference, dict):
+        return {k: align(v, reference[k]) if k in reference else v for k, v in predicted.items()}
+    if not (isinstance(predicted, list) and isinstance(reference, list)) or not reference or _has_id(reference):
+        return predicted
+    scored = []
+    for i, p_item in enumerate(predicted):
+        p_flat = flatten(align(p_item, reference[min(i, len(reference) - 1)]))
+        for j, r_item in enumerate(reference):
+            scored.append((soft_f1(p_flat, flatten(r_item)), -abs(i - j), i, j))
+    placed: dict[int, Any] = {}
+    used: set[int] = set()
+    for credit, _, i, j in sorted(scored, reverse=True):
+        if credit > 0 and i not in used and j not in placed:
+            placed[j] = align(predicted[i], reference[j])
+            used.add(i)
+    leftover = [align(item, reference[0]) if isinstance(item, (dict, list)) else item
+                for i, item in enumerate(predicted) if i not in used]
+    # unmatched predicted items fill the reference's holes in order, then go after it
+    out = [placed.get(j, GAP) for j in range(len(reference))]
+    for j in range(len(reference)):
+        if out[j] is GAP and leftover:
+            out[j] = leftover.pop(0)
+    return out + leftover
+
+
+def schema_from_prompt(prompt: str) -> dict | None:
+    """The JSON Schema the prompt asks the answer to follow (the object after `JSON Schema:`), if there is one."""
+    marker = prompt.find("JSON Schema:")
+    start = prompt.find("{", marker) if marker != -1 else -1
+    if start == -1:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(prompt[start:])[0]
+    except ValueError:
+        return None
+
+
+def schema_score(answer: Any, schema: dict | None) -> float:
+    """1.0 when the answer validates against the schema (types, required keys, no extra keys), less for every
+    violation. A number written as a string, a missing key or an invented one are all violations."""
+    if schema is None:
+        return 1.0
+    from jsonschema import Draft202012Validator
+    try:
+        errors = sum(1 for _ in Draft202012Validator(schema).iter_errors(answer))
+    except Exception:                                        # a schema the validator cannot read: do not punish
+        return 1.0
+    return 1.0 if not errors else 1.0 / (1.0 + errors)
+
+
+# ---- reward for RL training -------------------------------------------------------------------------
+
+# reward = PARSES + SCHEMA * (answer follows the prompt's JSON Schema) + CONTENT * (fields right, minus invention).
+# Invalid JSON is 0 (a gate, as in the structured-output RL papers); content carries most of the weight.
+PARSES, SCHEMA, CONTENT = 0.05, 0.10, 0.85
+HALLUCINATION_PENALTY = 0.5    # taken off for every reference-null field the model filled in, scaled by their share
+YEAR_RANGE = (1900, 2035)
+
+
+def suspicious_reference(reference: str) -> bool:
+    """True when a reference value cannot be right (a date in year 2094, a month 13): drop such examples from RL
+    training, where the policy would be pushed toward the error. Checks only values that parse as a full date."""
+    ref_json = extract_json(reference) if reference.lstrip()[:1] in "{[" else None
+    if ref_json is None:
+        return False
+    for value in flatten(ref_json).values():
+        for year, _, _ in parse_dates(value)[:1]:
+            if year is not None and not YEAR_RANGE[0] <= year <= YEAR_RANGE[1]:
+                return True
+    return False
+
+
+def reward(prediction: str, reference: str, prompt: str | None = None) -> float:
+    """Scalar in [0, 1] for RL, built for schema extraction. 0 when the answer is not JSON (or cut off); otherwise
+    PARSES + SCHEMA * schema compliance (the schema is read from `prompt` when given) + CONTENT * the tolerant
+    field score, minus a penalty for inventing values where the reference is null. Lists without ids (line items,
+    rows) are matched by content, not position. Not JSON answers (short, OCR text) score as in `score_example`.
+    Keep tracking `strict_f1` next to it: if this rises and strict stays flat, the policy is exploiting the tolerance."""
+    result = score_example(prediction, reference)
+    answer = result.pop("_answer", None)
+    if result["kind"] != "json":
+        return float(result["score"])
+    if not result["json_valid"] or not isinstance(answer, (dict, list)):
+        return 0.0
+    content = max(0.0, min(1.0, result["value_f1"] - HALLUCINATION_PENALTY * result["hallucination"]))
+    compliance = schema_score(answer, schema_from_prompt(prompt) if prompt else None)
+    return round(PARSES + SCHEMA * compliance + CONTENT * content, 4)
 
 
 def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -173,7 +447,7 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
                            "json_valid": mean(results, "json_valid"), "per_task": {}}
     for task, rows in sorted(by_task.items()):
         out["per_task"][task] = {"n": len(rows), "score": mean(rows, "score"), "json_valid": mean(rows, "json_valid"),
-                                 "path_f1": mean(rows, "path_f1"), "strict_f1": mean(rows, "strict_f1"), "kind": rows[0]["kind"]}
+                                 "path_f1": mean(rows, "path_f1"), "strict_f1": mean(rows, "strict_f1"), "hallucination": mean(rows, "hallucination"), "kind": rows[0]["kind"]}
     return out
 
 
@@ -275,7 +549,7 @@ class GenerationEvaluator:
         for item, answer in zip(share, answers):
             rows.append({"id": item["id"], "task": item["task"], "reference": item["label"], "prediction": answer,
                          "prompt": item["prompt"], "images": item.get("image_paths", []),
-                         **score_example(answer, item["label"])})
+                         **{k: v for k, v in score_example(answer, item["label"]).items() if k != "_answer"}})
         if dd.is_dist():
             gathered: list[Any] = [None] * dd.world_size()
             torch_dist.all_gather_object(gathered, rows)
