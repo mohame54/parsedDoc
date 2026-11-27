@@ -8,3 +8,7 @@ __pycache__/
 
 # Generated data (downloads, rendered pages, annotations, batches, exports)
 data/
+
+# Modal deployment script (local only)
+modal_app.py
+tests/test_modal_app.py
