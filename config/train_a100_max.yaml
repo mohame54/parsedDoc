@@ -52,8 +52,8 @@ data:
   extended_p: 0.3              # share of schema extractions in the extended format (confidence, reason, rotation)
 
 batching:
-  batch_tokens: 12288         # padded tokens per micro-batch; with grad_checkpointing this is ~20-30 GB on an 80 GB card, so raise it after the probe
-  max_batch_size: 16           # most samples in one bucketed batch
+  batch_tokens: 24576         # padded tokens per micro-batch; with grad_checkpointing this is ~20-30 GB on an 80 GB card, so raise it after the probe
+  max_batch_size: 32           # most samples in one bucketed batch
   pad_multiple: 64
   batch_size: 2                # used only when batch_tokens is null
   pad_to_max: false            # pad every sample to max_length (wasteful; not with batch_tokens)
@@ -73,7 +73,7 @@ optimizer:
 training:
   strategy: single             # one A100 80GB, no torchrun needed
   epochs: 3                    # 3 x 16 = 48 draws per document; raise it only if the probe's projected cost allows
-  grad_accum: 8                # samples per step = grad_accum x samples per micro-batch (about 4 at 16k tokens): check the log, aim for ~64
+  grad_accum: 4                # samples per step = grad_accum x samples per micro-batch (about 4 at 16k tokens): check the log, aim for ~64
   precision: bf16              # A100 supports bf16: no loss scaler, no fp16 overflow
   compile: false               # varying batch shapes make it recompile; leave off with bucketing
   max_steps: 0                 # stop after this many optimizer steps; 0 = run all epochs
